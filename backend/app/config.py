@@ -20,12 +20,15 @@ class Settings(BaseSettings):
     max_retained_papers: int = 18
     max_concurrent_runs: int = 3
     daily_token_budget: int = 2_000_000
+    rate_limit_per_minute: int = 10  # per-IP cap on /api/search
 
     arxiv_page_size: int = 50
 
     backend_host: str = "127.0.0.1"
     backend_port: int = 8000
-    cors_allow_origins: str = "http://localhost:3000"
+    # The UI is served same-origin by this app; these origins only matter for
+    # cross-origin API clients. Keep locked to known hosts (no wildcard).
+    cors_allow_origins: str = "http://127.0.0.1:8000,http://localhost:8000"
 
     database_url: str = "sqlite:///./data/app.db"
 

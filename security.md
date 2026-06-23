@@ -93,16 +93,33 @@ for rerank/extract/synthesize.
 
 ## 6. Deployment Checklist
 
-- [ ] Secrets in env/secret manager, not in repo or frontend bundle.
-- [ ] `.env` gitignored; `.env.example` present.
-- [ ] Rate limiting + concurrency cap enabled.
-- [ ] Global spend ceiling configured.
-- [ ] CORS locked to known origins.
-- [ ] HTTPS enforced; security headers set.
-- [ ] Input validation (Pydantic) on every endpoint.
-- [ ] Parameterized DB access only.
-- [ ] Secret scanning + dependency audit in CI.
-- [ ] No secrets/prompts/PII in client-facing errors or logs.
+Status as of the v1 backend (single-server FastAPI + Alpine UI):
+
+- [x] Secrets in env, not in repo or frontend bundle (`.env` untracked; no
+      `NEXT_PUBLIC_*` secret; key never echoed in errors/logs).
+- [x] `.env` gitignored; `.env.example` present.
+- [x] Rate limiting (per-IP, `RATE_LIMIT_PER_MINUTE`) + concurrency cap
+      (`MAX_CONCURRENT_RUNS`) enforced on `/api/search`.
+- [ ] Global spend ceiling — `DAILY_TOKEN_BUDGET` is defined but token
+      accounting is **not yet wired**; bounded for now by candidate/token caps,
+      rate limit, and concurrency cap. See "Known gaps" below.
+- [x] CORS locked to known origins (no wildcard); UI is served same-origin.
+- [x] Security headers set (CSP, X-Content-Type-Options, X-Frame-Options,
+      Referrer-Policy). HTTPS to be enforced at the proxy/host in production.
+- [x] Input validation (Pydantic) on every endpoint (topic length/charset).
+- [ ] Parameterized DB access — N/A until persistence (M5) lands.
+- [ ] Secret scanning + dependency audit in CI — no CI yet.
+- [x] No secrets/prompts/PII in client-facing errors (generic messages; details
+      logged server-side only). Note: search topics are logged for debugging.
+
+### Known gaps (tracked, accepted for single-user v1)
+
+- **Spend ceiling not enforced.** Implement token accounting from LLM
+  `response.usage` and hard-stop when `DAILY_TOKEN_BUDGET` is hit (do before any
+  public, multi-user exposure).
+- **No CI secret scanning / dependency audit.** Add `gitleaks` + `pip-audit`
+  before opening the repo to external contributors.
+- **No auth** (see §7) — assumes single-user / trusted deployment.
 
 ## 7. Out of Scope (v1)
 
