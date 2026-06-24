@@ -126,6 +126,8 @@ Examples:
 - `state space models for language`
 - `test-time compute scaling`
 
+![Arxivore landscape example](image.png)
+
 ## Project layout
 
 ```
