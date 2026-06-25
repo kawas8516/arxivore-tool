@@ -177,14 +177,14 @@ No FastAPI, no uvicorn, no npm, no Next.js.
 
 ## 9. Implementation steps (ordered)
 
-- [ ] **Step 1** — Scaffold `app.py` with the three-tab Gradio skeleton (no pipeline logic yet; confirm it launches on Spaces)
-- [ ] **Step 2** — Copy and adapt `models.py`, `retrieve.py` (unchanged)
-- [ ] **Step 3** — Write new `llm.py` wrapping `InferenceClient` with `Phi-4-mini-instruct`; smoke-test with a single call
-- [ ] **Step 4** — Write new `rerank.py` using `BAAI/bge-reranker-v2-m3`; unit-test with 5 fake papers
-- [ ] **Step 5** — Adapt `extract.py` to call the new `llm.py` (swap `complete()` import only)
-- [ ] **Step 6** — Adapt `synthesize.py` the same way
-- [ ] **Step 7** — Wire pipeline into `app.py` generator; test end-to-end locally with `gradio app.py`
-- [ ] **Step 8** — Write the HF Spaces `README.md` card
+- [x] **Step 1** — Scaffold `app.py` with the three-tab Gradio skeleton
+- [x] **Step 2** — Copy and adapt `models.py`, `retrieve.py`
+- [x] **Step 3** — Write new `llm.py` wrapping `InferenceClient` with `Phi-4-mini-instruct`
+- [x] **Step 4** — Write new `rerank.py` using `BAAI/bge-reranker-v2-m3`
+- [x] **Step 5** — Adapt `extract.py` to call the new `llm.py`
+- [x] **Step 6** — Adapt `synthesize.py` the same way
+- [x] **Step 7** — Wire full pipeline into `app.py` generator with live status updates
+- [x] **Step 8** — Write the HF Spaces `README.md` card
 - [ ] **Step 9** — Push branch; create Space at `huggingface.co/spaces/<username>/arxivore`; link repo
 - [ ] **Step 10** — Validate the live Space: run one query, confirm all three tabs populate
 
