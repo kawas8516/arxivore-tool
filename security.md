@@ -108,7 +108,9 @@ Status as of the v1 backend (single-server FastAPI + Alpine UI):
       Referrer-Policy). HTTPS to be enforced at the proxy/host in production.
 - [x] Input validation (Pydantic) on every endpoint (topic length/charset).
 - [ ] Parameterized DB access — N/A until persistence (M5) lands.
-- [ ] Secret scanning + dependency audit in CI — no CI yet.
+- [~] Secret scanning — a local **pre-commit secret guard** is in place
+      (`scripts/git-hooks/pre-commit`, activated via `core.hooksPath`); CI-side
+      scanning + dependency audit still pending.
 - [x] No secrets/prompts/PII in client-facing errors (generic messages; details
       logged server-side only). Note: search topics are logged for debugging.
 
@@ -117,9 +119,31 @@ Status as of the v1 backend (single-server FastAPI + Alpine UI):
 - **Spend ceiling not enforced.** Implement token accounting from LLM
   `response.usage` and hard-stop when `DAILY_TOKEN_BUDGET` is hit (do before any
   public, multi-user exposure).
-- **No CI secret scanning / dependency audit.** Add `gitleaks` + `pip-audit`
+- **No CI secret scanning / dependency audit.** A local pre-commit guard exists
+  (`scripts/git-hooks/pre-commit`); still add `gitleaks` + `pip-audit` in CI
   before opening the repo to external contributors.
 - **No auth** (see §7) — assumes single-user / trusted deployment.
+
+## 6a. Before Going Public
+
+Run through this once before flipping the GitHub repo to public visibility.
+
+- [ ] **Confirm repo visibility** is what you intend (GitHub → Settings).
+- [ ] **No secret in history:** `git grep "sk-or-v1" $(git rev-list --all)` and
+      `git log --all -S "<your key>"` both return nothing. (`.env` must be
+      untracked — verify with `git check-ignore .env`.)
+- [ ] **Rotate the LLM API key** if it was ever pasted into chat, screenshots, or
+      a non-`.env` file — cheap insurance. Update `.env`, then revoke the old key
+      at https://openrouter.ai/settings/keys.
+- [ ] **Set an OpenRouter spend / credit cap** on the key so exposure can never
+      produce a runaway bill, regardless of leaks.
+- [ ] **Pre-commit secret guard active:** `git config core.hooksPath` returns
+      `scripts/git-hooks`. New clones must run this once (it is not auto-applied
+      on clone).
+- [ ] **Skim the diff that goes public** for stray tokens, internal URLs, or PII.
+
+> The hook is local. For real enforcement on a public repo, also add a
+> server-side secret scan (GitHub secret scanning / `gitleaks` Action).
 
 ## 7. Out of Scope (v1)
 

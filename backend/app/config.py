@@ -13,8 +13,33 @@ class Settings(BaseSettings):
 
     llm_api_key: str
     llm_base_url: str = "https://openrouter.ai/api/v1"
+    # Legacy single-model vars — kept so older .env files still boot. Each is the
+    # position-0 default of the corresponding pool below.
     llm_synthesis_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     llm_rerank_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+
+    # Ordered failover pools (strongest-first). Comma-separated model ids, or the
+    # literal "auto" to discover free models from OpenRouter at runtime. Position 0
+    # is what runs on a healthy request, so accuracy is unchanged until a model is
+    # rate-limited and we descend the list. See app/llm.py.
+    llm_synthesis_models: str = (
+        "nvidia/nemotron-3-ultra-550b-a55b:free,"
+        "nvidia/nemotron-3-super-120b-a12b:free,"
+        "nousresearch/hermes-3-llama-3.1-405b:free,"
+        "openai/gpt-oss-120b:free,"
+        "openrouter/owl-alpha"
+    )
+    llm_rerank_models: str = (
+        "meta-llama/llama-3.3-70b-instruct:free,"
+        "openai/gpt-oss-120b:free,"
+        "google/gemma-4-31b-it:free,"
+        "nvidia/nemotron-3-nano-30b-a3b:free,"
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    )
+    # When a model returns 429, skip it for this long (fallback if no Retry-After).
+    llm_cooldown_seconds: int = 60
+    # How long to cache the discovered free-model catalog (auto mode).
+    llm_models_cache_ttl: int = 3600
 
     max_candidates: int = 50
     max_retained_papers: int = 18

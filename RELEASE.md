@@ -125,3 +125,123 @@ reviewed the codebase against [`security.md`](security.md).
   reflect the free tier, not a paid provider.
 - Wiring `response.usage` through the three LLM stages is the next instrumentation
   target — it also unlocks enforcement of `DAILY_TOKEN_BUDGET` (lapse #3).
+
+---
+
+# Multi-Model Failover & Extract Batching — v0.1.2
+
+Replaced the single-model LLM setup with a **hybrid failover pool system** and
+**batched extraction**, reducing rate-limit failures and cutting extract token
+usage by ~60%.
+
+## Problem
+
+Free-tier OpenRouter models have per-minute and daily rate limits. With a single
+model pinned per stage, any rate-limit hit returned a generic `502` and aborted
+the run. Extract called the LLM 18× (one paper per call), burning rate-limit
+quota fast and paying the system prompt cost 18 times.
+
+## What Shipped
+
+### `backend/app/llm.py` — new shared LLM module
+
+Single entry point for all LLM calls (previously each stage created its own
+`OpenAI` client). Key behaviours:
+
+- **One reused client** across all stages and threads — memory-optimal.
+- **Hybrid failover:** each request carries OpenRouter's native `models[]` array
+  (in-request fallback, no wasted output tokens if primary is rate-limited) **plus**
+  an in-process per-model cooldown registry so a rate-limited model is skipped on
+  subsequent calls without even attempting it.
+- **Auto-cool on silent fallback:** when OpenRouter's inner fallback serves a
+  response from a different model than requested, the primary is immediately cooled
+  — so the next call goes straight to the working model without waiting for
+  OpenRouter to re-route.
+- **`AllModelsRateLimited` exception** raised when every model in a pool is
+  unavailable, surfaced as HTTP `429` ("try again in a minute") at the API layer —
+  distinct from the per-IP `429` and generic `502`.
+- **`auto` discovery mode:** set `LLM_*_MODELS=auto` to fetch OpenRouter's free
+  model catalog at runtime (cached 1 h); your account's allowed-models list gates
+  which actually serve. True zero-touch when you add/remove models on OpenRouter.
+
+### Two ordered failover pools
+
+Models listed strongest-first. Position 0 is what runs on a healthy request —
+accuracy is unchanged until rate-limit pressure forces failover.
+
+| Pool | Models (in order) |
+|------|------------------|
+| Rerank + Extract | `meta-llama/llama-3.3-70b-instruct:free` → `openai/gpt-oss-120b:free` → `google/gemma-4-31b-it:free` → `nvidia/nemotron-3-nano-30b-a3b:free` → `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` |
+| Synthesis | `nvidia/nemotron-3-ultra-550b-a55b:free` → `nvidia/nemotron-3-super-120b-a12b:free` → `nousresearch/hermes-3-llama-3.1-405b:free` → `openai/gpt-oss-120b:free` → `openrouter/owl-alpha` |
+
+> All synthesis-pool models have ≥ 131K context — failover can never silently
+> truncate the synthesis prompt (18 extracted papers).
+
+> "Llama Nemotron Rerank VL 1B" (embedding-style reranker) was excluded — it is
+> not a chat/JSON-completion model and cannot serve these prompts.
+
+### Batched extraction (`backend/app/pipeline/extract.py`)
+
+| Before | After |
+|--------|-------|
+| 1 paper per LLM call | 4 papers per LLM call |
+| 18 calls per run | 5 calls per run |
+| `_MAX_WORKERS = 2` (9 serial rounds) | `_MAX_WORKERS = 3` (2 serial rounds) |
+| System prompt paid 18× | System prompt paid 5× |
+
+Token savings: ~2,600 input tokens per run on system prompts alone (~60%
+reduction on extract stage). Rate-limit pressure drops from 18 calls to 5
+calls per run.
+
+Batch failure isolation: if a batch fails (parse error or model error), the
+papers in that batch are marked `extract_status = "error"` and the rest
+continue — same per-paper resilience guarantee as before.
+
+### `.bat` launcher
+
+`start.bat` added to repo root — double-click to start the backend with one
+click (activates `.venv`, runs `uvicorn --reload`, keeps the window open on
+crash).
+
+### OpenRouter constraint discovered
+
+OpenRouter caps the native `models[]` fallback array at **3 models per
+request**. The pool can be longer (cooldown memory spans calls), but only the
+first 3 non-cooling models are sent per request.
+
+## Config Changes
+
+```env
+# New in .env / .env.example
+LLM_RERANK_MODELS=<comma-separated pool or "auto">
+LLM_SYNTHESIS_MODELS=<comma-separated pool or "auto">
+LLM_COOLDOWN_SECONDS=60
+LLM_MODELS_CACHE_TTL=3600
+```
+
+Legacy `LLM_RERANK_MODEL` / `LLM_SYNTHESIS_MODEL` (single-model vars) are kept
+as documented fallback defaults so existing `.env` files still boot.
+
+## Models Used
+
+| Role | Model |
+|------|-------|
+| Development | Claude Opus 4.8 / Sonnet 4.6 |
+| Rerank + Extract (primary) | `meta-llama/llama-3.3-70b-instruct:free` |
+| Rerank + Extract (failover) | `openai/gpt-oss-120b:free` (auto-triggered on rate limit) |
+| Synthesis | `nvidia/nemotron-3-ultra-550b-a55b:free` |
+
+## Tests Run
+
+- **20 unit tests — 20 passed.**
+- 9 new tests added: failover, cooldown, all-exhausted, auto-discovery (2 pool
+  variants), OpenRouter silent-fallback cooling, per-stage mock repointing.
+- **Live end-to-end** (first run with failover active):
+
+  | Topic | Retrieved | Ranked | Extracted | Result |
+  |-------|----------:|-------:|----------:|--------|
+  | retrieval-augmented generation | 50 | 18 | 18/18 ✓ | synthesized |
+
+  Failover triggered on nearly every extract call (llama rate-limited); gpt-oss-120b
+  served all 18 papers. Extract time: ~105 s (pre-batching). With batching and
+  auto-cooling: expected ~2–3× improvement on next run.

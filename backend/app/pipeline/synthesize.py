@@ -2,9 +2,8 @@ import json
 import logging
 import time
 
-from openai import OpenAI
-
 from app.config import get_settings
+from app.llm import complete, resolve_pool, strip_fences
 from app.models import Landscape, Paper
 
 logger = logging.getLogger(__name__)
@@ -45,14 +44,6 @@ JSON object. Nothing else.\
 """
 
 
-def _strip_fences(raw: str) -> str:
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        inner = [l for l in lines[1:] if l.strip() != "```"]
-        return "\n".join(inner).strip()
-    return raw
-
-
 def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, int]:
     """Cross-read extracted papers into a research landscape.
 
@@ -61,7 +52,7 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
     how to surface it (synthesis is a single high-value call).
     """
     settings = get_settings()
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=5)
+    pool = resolve_pool(settings.llm_synthesis_models, "synthesis")
 
     # Only feed papers that were successfully extracted; pass the distilled
     # fields, not raw abstracts — keeps the synthesis prompt compact.
@@ -79,10 +70,8 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
     ]
 
     start = time.monotonic()
-    response = client.chat.completions.create(
-        model=settings.llm_synthesis_model,
-        max_tokens=4096,
-        messages=[
+    content = complete(
+        [
             {"role": "system", "content": _SYSTEM},
             {
                 "role": "user",
@@ -92,13 +81,12 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
                 ),
             },
         ],
+        pool=pool,
+        max_tokens=4096,
     )
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
-    content = response.choices[0].message.content if response.choices else None
-    if not content:
-        raise ValueError("model returned empty content")
-    raw = _strip_fences(content.strip())
+    raw = strip_fences(content.strip())
     data: dict = json.loads(raw)
     landscape = Landscape.model_validate(data)
 

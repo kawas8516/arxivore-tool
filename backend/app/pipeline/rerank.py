@@ -1,8 +1,8 @@
 import json
 import time
-from openai import OpenAI
 
 from app.config import get_settings
+from app.llm import complete, resolve_pool
 from app.models import Paper
 
 
@@ -35,7 +35,7 @@ Respond with ONLY a JSON array of those objects, one per paper. Nothing else.\
 
 def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper], int]:
     settings = get_settings()
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=5)
+    pool = resolve_pool(settings.llm_rerank_models, "rerank")
 
     # Pass only what the LLM needs — never more surface area than necessary
     papers_payload = [
@@ -44,10 +44,8 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
     ]
 
     start = time.monotonic()
-    response = client.chat.completions.create(
-        model=settings.llm_rerank_model,
-        max_tokens=4096,
-        messages=[
+    content = complete(
+        [
             {"role": "system", "content": _SYSTEM},
             {
                 "role": "user",
@@ -57,12 +55,11 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
                 ),
             },
         ],
+        pool=pool,
+        max_tokens=4096,
     )
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
-    content = response.choices[0].message.content if response.choices else None
-    if not content:
-        raise ValueError("model returned empty content")
     raw = content.strip()
     scores: list[dict] = json.loads(raw)  # raises json.JSONDecodeError on bad output
 

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Arxivore pre-commit secret guard.
+#
+# Blocks commits whose staged changes contain likely secrets (API keys, private
+# keys). This is defense-in-depth on top of .gitignore — it catches keys pasted
+# into the wrong file, not just the ignored .env.
+#
+# Bypass (only if you are certain it is a false positive):
+#   git commit --no-verify
+
+# Secret patterns to catch. Add more as needed.
+patterns='sk-or-v1-[A-Za-z0-9_-]{12,}|sk-or-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+
+# Only look at ADDED lines in the staged diff; drop the +++ file-header lines.
+added=$(git diff --cached --no-color -U0 | grep -E '^\+' | grep -vE '^\+\+\+')
+
+hits=$(printf '%s\n' "$added" | grep -EnI "$patterns")
+
+if [ -n "$hits" ]; then
+  echo "==============================================================="
+  echo " COMMIT BLOCKED: possible secret detected in staged changes."
+  echo "==============================================================="
+  printf '%s\n' "$hits"
+  echo ""
+  echo "Remove the secret (keep real keys only in the gitignored .env)."
+  echo "If this is genuinely a false positive: git commit --no-verify"
+  exit 1
+fi
+
+exit 0

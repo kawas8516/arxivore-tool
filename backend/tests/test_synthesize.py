@@ -1,5 +1,5 @@
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from app.models import Author, Paper
 from app.pipeline.synthesize import synthesize_landscape
@@ -21,16 +21,6 @@ def _make_paper(arxiv_id: str, status: str = "done") -> Paper:
         contribution="A contribution.",
         extract_status=status,
     )
-
-
-def _fake_response(data: dict) -> MagicMock:
-    message = MagicMock()
-    message.content = json.dumps(data)
-    choice = MagicMock()
-    choice.message = message
-    response = MagicMock()
-    response.choices = [choice]
-    return response
 
 
 _LANDSCAPE = {
@@ -59,11 +49,9 @@ _LANDSCAPE = {
 }
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_parses_landscape(mock_openai_cls):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = _fake_response(_LANDSCAPE)
-    mock_openai_cls.return_value = mock_client
+@patch("app.pipeline.synthesize.complete")
+def test_synthesize_parses_landscape(mock_complete):
+    mock_complete.return_value = json.dumps(_LANDSCAPE)
 
     papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
     landscape, elapsed_ms = synthesize_landscape("retrieval", papers)
@@ -78,11 +66,9 @@ def test_synthesize_parses_landscape(mock_openai_cls):
     assert landscape.open_problems == _LANDSCAPE["open_problems"]
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_only_sends_extracted_papers(mock_openai_cls):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = _fake_response(_LANDSCAPE)
-    mock_openai_cls.return_value = mock_client
+@patch("app.pipeline.synthesize.complete")
+def test_synthesize_only_sends_extracted_papers(mock_complete):
+    mock_complete.return_value = json.dumps(_LANDSCAPE)
 
     papers = [
         _make_paper("2401.0001", status="done"),
@@ -92,24 +78,16 @@ def test_synthesize_only_sends_extracted_papers(mock_openai_cls):
     synthesize_landscape("retrieval", papers)
 
     # Inspect the payload actually sent to the LLM
-    call = mock_client.chat.completions.create.call_args
-    user_content = call.kwargs["messages"][-1]["content"]
+    messages = mock_complete.call_args.args[0]
+    user_content = messages[-1]["content"]
     assert "2401.0001" in user_content
     assert "2401.0003" in user_content
     assert "2401.0002" not in user_content
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_handles_markdown_fenced_json(mock_openai_cls):
-    mock_client = MagicMock()
-    fenced = MagicMock()
-    fenced.content = "```json\n" + json.dumps(_LANDSCAPE) + "\n```"
-    choice = MagicMock()
-    choice.message = fenced
-    response = MagicMock()
-    response.choices = [choice]
-    mock_client.chat.completions.create.return_value = response
-    mock_openai_cls.return_value = mock_client
+@patch("app.pipeline.synthesize.complete")
+def test_synthesize_handles_markdown_fenced_json(mock_complete):
+    mock_complete.return_value = "```json\n" + json.dumps(_LANDSCAPE) + "\n```"
 
     papers = [_make_paper("2401.0001")]
     landscape, _ = synthesize_landscape("retrieval", papers)

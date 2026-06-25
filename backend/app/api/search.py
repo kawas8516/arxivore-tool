@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from fastapi import APIRouter, HTTPException, Request
 
 from app.config import get_settings
+from app.llm import AllModelsRateLimited
 from app.models import SearchRequest, SearchResponse
 from app.service import run_pipeline, PipelineError
 
@@ -52,6 +53,11 @@ def search(request: SearchRequest, http_request: Request) -> SearchResponse:
         )
     try:
         return run_pipeline(request.topic)
+    except AllModelsRateLimited as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="All models are rate-limited right now. Please try again in a minute.",
+        ) from exc
     except PipelineError as exc:
         raise HTTPException(status_code=502, detail=exc.message) from exc
     finally:

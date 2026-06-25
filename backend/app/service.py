@@ -1,5 +1,6 @@
 import logging
 
+from app.llm import AllModelsRateLimited
 from app.models import SearchResponse
 from app.pipeline.retrieve import retrieve_candidates
 from app.pipeline.rerank import rerank_candidates
@@ -45,6 +46,10 @@ def run_pipeline(topic: str) -> SearchResponse:
 
     try:
         ranked, rerank_ms = rerank_candidates(topic, candidates)
+    except AllModelsRateLimited:
+        # Every model is rate-limited — let the API surface a 429, not a 502.
+        logger.warning("rerank rate-limited topic=%r", topic)
+        raise
     except Exception as exc:
         logger.exception("rerank failed topic=%r", topic)
         raise PipelineError("rerank", "Failed to rerank papers") from exc
