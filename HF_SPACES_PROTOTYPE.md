@@ -21,28 +21,37 @@ Everything else stays the same: the four-stage pipeline (`retrieve → rerank �
 
 ## 2. Model selection from Hugging Face
 
-### Synthesis (main LLM — needs strong reasoning)
+### Synthesis + Extraction (main LLM)
 
-| Model | HF repo | Why |
-|---|---|---|
-| **`mistralai/Mistral-7B-Instruct-v0.3`** ✅ recommended | `mistralai/Mistral-7B-Instruct-v0.3` | Fast, free Inference API tier, excellent instruction-following, fits in 8 GB VRAM on Space CPU |
-| `meta-llama/Meta-Llama-3-8B-Instruct` | same name | Strong, requires HF token (gated) |
-| `HuggingFaceH4/zephyr-7b-beta` | same name | Good alternative if Mistral rate-limits |
+**Chosen: `microsoft/Phi-4-mini-instruct`**
 
-**Decision:** Default to Mistral-7B-Instruct-v0.3. No token needed on public Spaces. Fall back to Zephyr if the Space's Inference API quota is hit.
+| Property | Value |
+|---|---|
+| HF repo | `microsoft/Phi-4-mini-instruct` |
+| Parameters | 3.8B |
+| License | MIT |
+| Downloads | 765K |
+| HF Inference API | Yes — free tier, no gating |
+| Link | https://hf.co/microsoft/Phi-4-mini-instruct |
 
-### Rerank (lighter, cheaper)
+**Why Phi-4-mini-instruct:** Fastest cold start on Spaces CPU (3.8B vs 7B), MIT license, strong structured JSON output for extraction, and Microsoft's newest Phi-4 generation outperforms older 7B models on instruction benchmarks despite being smaller. Ideal for a live recruiter demo where latency matters.
 
-| Model | HF repo | Why |
-|---|---|---|
-| **`cross-encoder/ms-marco-MiniLM-L-6-v2`** ✅ recommended | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Native cross-encoder for reranking, tiny (22 M params), runs on CPU, no generation needed |
-| `BAAI/bge-reranker-base` | same name | Slightly stronger, same size |
+Extraction is done by prompting Phi-4-mini-instruct with strict JSON-only instructions — no separate model needed.
 
-**Decision:** Use `cross-encoder/ms-marco-MiniLM-L-6-v2` via `sentence-transformers` for rerank instead of an LLM. This eliminates LLM API cost for reranking and speeds up the pipeline.
+### Rerank (dedicated cross-encoder — no LLM cost)
 
-### Extraction (structured output from abstract)
+**Chosen: `BAAI/bge-reranker-v2-m3`**
 
-Extraction is done by prompting the synthesis LLM (Mistral-7B-Instruct) with strict JSON-only instructions, identical to the current pipeline. No separate model needed.
+| Property | Value |
+|---|---|
+| HF repo | `BAAI/bge-reranker-v2-m3` |
+| Parameters | 568M (XLM-RoBERTa base) |
+| License | Apache 2.0 |
+| Downloads | 16.2M |
+| Library | `sentence-transformers` |
+| Link | https://hf.co/BAAI/bge-reranker-v2-m3 |
+
+**Why bge-reranker-v2-m3:** Most downloaded reranker on HF (16.2M), multilingual, runs on CPU in ~0.5s for 50 papers, no API cost. Significantly stronger than ms-marco-MiniLM while still being CPU-viable.
 
 ---
 
@@ -53,7 +62,7 @@ huggingface_hub/
   app.py                  ← Gradio app entry point (replaces main.py + Next.js)
   pipeline/
     retrieve.py           ← unchanged from backend/app/pipeline/retrieve.py
-    rerank.py             ← swapped: sentence-transformers cross-encoder
+    rerank.py             ← swapped: BAAI/bge-reranker-v2-m3 via sentence-transformers
     extract.py            ← unchanged, but calls HF Inference API instead of OpenRouter
     synthesize.py         ← unchanged, but calls HF Inference API instead of OpenRouter
   llm.py                  ← thin wrapper around huggingface_hub.InferenceClient
@@ -93,9 +102,10 @@ The UI streams progress via a Python generator yielding status strings — no SS
 ```python
 from huggingface_hub import InferenceClient
 
+_MODEL = "microsoft/Phi-4-mini-instruct"
 _client = InferenceClient()  # uses HF_TOKEN env var if set, else public API
 
-def complete(prompt: str, model: str = "mistralai/Mistral-7B-Instruct-v0.3") -> str:
+def complete(prompt: str, model: str = _MODEL) -> str:
     response = _client.text_generation(
         prompt,
         model=model,
@@ -115,7 +125,7 @@ No failover pool needed for the demo — single model, single call. Add a retry 
 ```python
 from sentence_transformers import CrossEncoder
 
-_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+_model = CrossEncoder("BAAI/bge-reranker-v2-m3")
 
 def rerank(query: str, papers: list[Paper], top_k: int = 10) -> list[Paper]:
     pairs = [(query, f"{p.title}. {p.abstract}") for p in papers]
@@ -124,7 +134,7 @@ def rerank(query: str, papers: list[Paper], top_k: int = 10) -> list[Paper]:
     return [p for _, p in ranked[:top_k]]
 ```
 
-This runs on CPU in ~0.5 s for 50 papers. No API cost.
+This runs on CPU in ~0.5 s for 50 papers. No API cost. `bge-reranker-v2-m3` is multilingual and the most downloaded reranker on HF (16.2M).
 
 ---
 
@@ -169,8 +179,8 @@ No FastAPI, no uvicorn, no npm, no Next.js.
 
 - [ ] **Step 1** — Scaffold `app.py` with the three-tab Gradio skeleton (no pipeline logic yet; confirm it launches on Spaces)
 - [ ] **Step 2** — Copy and adapt `models.py`, `retrieve.py` (unchanged)
-- [ ] **Step 3** — Write new `llm.py` wrapping `InferenceClient`; smoke-test with a single Mistral call
-- [ ] **Step 4** — Write new `rerank.py` using `CrossEncoder`; unit-test with 5 fake papers
+- [ ] **Step 3** — Write new `llm.py` wrapping `InferenceClient` with `Phi-4-mini-instruct`; smoke-test with a single call
+- [ ] **Step 4** — Write new `rerank.py` using `BAAI/bge-reranker-v2-m3`; unit-test with 5 fake papers
 - [ ] **Step 5** — Adapt `extract.py` to call the new `llm.py` (swap `complete()` import only)
 - [ ] **Step 6** — Adapt `synthesize.py` the same way
 - [ ] **Step 7** — Wire pipeline into `app.py` generator; test end-to-end locally with `gradio app.py`
@@ -187,7 +197,7 @@ No FastAPI, no uvicorn, no npm, no Next.js.
 3. Watch the pipeline progress in real time — retrieve → rerank → extract → synthesize.
 4. Show the ranked paper table with structured extractions.
 5. Show the synthesized landscape: clusters, open problems, tensions.
-6. Point to the code: flat Python, one `app.py`, four pipeline stages, a cross-encoder for reranking, Mistral-7B for synthesis — demonstrating end-to-end ML pipeline design.
+6. Point to the code: flat Python, one `app.py`, four pipeline stages, `BAAI/bge-reranker-v2-m3` cross-encoder for reranking, `Phi-4-mini-instruct` for synthesis/extraction — demonstrating end-to-end ML pipeline design with two distinct HF models.
 
 **Key talking points:**
 - Four-stage agentic pipeline (not just a wrapper around one LLM call)
@@ -203,7 +213,7 @@ No FastAPI, no uvicorn, no npm, no Next.js.
 
 | Risk | Mitigation |
 |---|---|
-| HF Inference API rate limits Mistral-7B on free tier | Pre-load model in Space with `InferenceClient(model=...)` + retry; or switch to `HuggingFaceH4/zephyr-7b-beta` as fallback |
-| Synthesis output too slow for live demo (7B on shared CPU) | Cap `max_new_tokens=512` for demo; optionally use `mistralai/Mistral-7B-Instruct-v0.2` which is slightly faster |
-| Cross-encoder model download on first Spaces cold start (~90 MB) | Pin model in `requirements.txt` + load at module level so it caches after first run |
+| HF Inference API rate limits Phi-4-mini on free tier | Add `tenacity` retry with exponential backoff; fall back to `HuggingFaceH4/zephyr-7b-beta` as secondary |
+| Synthesis output slow on shared Spaces CPU (3.8B still needs RAM) | Cap `max_new_tokens=512` for demo; Phi-4-mini at 3.8B is significantly faster than 7B alternatives |
+| bge-reranker-v2-m3 download on first Spaces cold start (~1.1 GB) | Load at module level so it caches after first run; subsequent requests are instant |
 | arXiv API flakiness | Existing retry logic in `retrieve.py` carries over unchanged |
