@@ -1,7 +1,9 @@
 import json
+import pytest
 from unittest.mock import MagicMock, patch
 
 from app.models import Author, Paper
+from app.pipeline._json import LLMOutputError
 from app.pipeline.rerank import rerank_candidates
 
 
@@ -18,9 +20,10 @@ def _make_paper(arxiv_id: str, score: float | None = None) -> Paper:
     )
 
 
-def _fake_llm_response(scores: list[dict]) -> MagicMock:
+def _fake_llm_response(scores: list[dict], raw: str | None = None) -> MagicMock:
     message = MagicMock()
-    message.content = json.dumps(scores)
+    # JSON mode requires an object at the root, so scores are wrapped in "items".
+    message.content = raw if raw is not None else json.dumps({"items": scores})
     choice = MagicMock()
     choice.message = message
     response = MagicMock()
@@ -39,7 +42,7 @@ def test_rerank_sorts_by_score(mock_openai_cls):
     ])
     mock_openai_cls.return_value = mock_client
 
-    ranked, elapsed_ms = rerank_candidates("test topic", candidates)
+    ranked, elapsed_ms, _, _ = rerank_candidates("test topic", candidates)
 
     assert ranked[0].arxiv_id == "2401.0002"
     assert ranked[1].arxiv_id == "2401.0001"
@@ -60,5 +63,66 @@ def test_rerank_respects_max_retained(mock_openai_cls):
     mock_openai_cls.return_value = mock_client
 
     # max_retained_papers defaults to 18, but we only have 5 candidates
-    ranked, _ = rerank_candidates("test topic", candidates)
+    ranked, _, _, _ = rerank_candidates("test topic", candidates)
     assert len(ranked) <= 5
+
+
+@patch("app.pipeline.rerank.OpenAI")
+def test_rerank_handles_markdown_fenced_json(mock_openai_cls):
+    """Regression: fenced JSON used to raise straight through as a hard 502."""
+    payload = {"items": [{"arxiv_id": "2401.0001", "score": 0.7, "rationale": "ok"}]}
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_llm_response(
+        [], raw="```json\n" + json.dumps(payload) + "\n```"
+    )
+    mock_openai_cls.return_value = mock_client
+
+    ranked, _, _, _ = rerank_candidates("test topic", [_make_paper("2401.0001")])
+
+    assert ranked[0].relevance_score == 0.7
+
+
+@patch("app.pipeline.rerank.OpenAI")
+def test_rerank_rejects_out_of_range_score(mock_openai_cls):
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_llm_response(
+        [{"arxiv_id": "2401.0001", "score": 4.2, "rationale": "nonsense"}]
+    )
+    mock_openai_cls.return_value = mock_client
+
+    with pytest.raises(LLMOutputError):
+        rerank_candidates("test topic", [_make_paper("2401.0001")])
+
+
+@patch("app.pipeline.rerank.OpenAI")
+def test_rerank_tolerates_unscored_candidate(mock_openai_cls):
+    """A paper the model skipped keeps score None and sorts last, but is logged."""
+    candidates = [_make_paper("2401.0001"), _make_paper("2401.0002")]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_llm_response(
+        [{"arxiv_id": "2401.0001", "score": 0.5, "rationale": "ok"}]
+    )
+    mock_openai_cls.return_value = mock_client
+
+    ranked, _, _, _ = rerank_candidates("test topic", candidates)
+
+    assert ranked[0].arxiv_id == "2401.0001"
+    assert ranked[-1].arxiv_id == "2401.0002"
+    assert ranked[-1].relevance_score is None
+
+
+@patch("app.pipeline.rerank.OpenAI")
+def test_rerank_reports_token_usage(mock_openai_cls):
+    response = _fake_llm_response([{"arxiv_id": "2401.0001", "score": 0.5, "rationale": "ok"}])
+    response.usage.prompt_tokens = 1500
+    response.usage.completion_tokens = 300
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = response
+    mock_openai_cls.return_value = mock_client
+
+    _, _, prompt_tokens, completion_tokens = rerank_candidates(
+        "test topic", [_make_paper("2401.0001")]
+    )
+
+    assert prompt_tokens == 1500
+    assert completion_tokens == 300

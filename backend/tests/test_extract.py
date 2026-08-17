@@ -2,7 +2,8 @@ import json
 from unittest.mock import MagicMock, patch
 
 from app.models import Author, Paper
-from app.pipeline.extract import extract_papers, _strip_fences
+from app.pipeline.extract import extract_papers
+from app.pipeline._json import strip_fences
 
 
 def _make_paper(arxiv_id: str) -> Paper:
@@ -43,7 +44,7 @@ def test_extract_maps_fields(mock_openai_cls):
     mock_openai_cls.return_value = mock_client
 
     papers = [_make_paper("2401.0001")]
-    result, elapsed_ms, errors = extract_papers(papers)
+    result, elapsed_ms, errors, _, _ = extract_papers(papers)
 
     assert errors == 0
     assert elapsed_ms >= 0
@@ -70,7 +71,7 @@ def test_extract_single_failure_does_not_fail_batch(mock_openai_cls):
     mock_openai_cls.return_value = mock_client
 
     papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
-    result, _, errors = extract_papers(papers)
+    result, _, errors, _, _ = extract_papers(papers)
 
     assert errors == 1
     statuses = {p.arxiv_id: p.extract_status for p in result}
@@ -81,9 +82,57 @@ def test_extract_single_failure_does_not_fail_batch(mock_openai_cls):
 
 def test_strip_fences_removes_markdown():
     raw = "```json\n{\"key\": \"value\"}\n```"
-    assert _strip_fences(raw) == '{"key": "value"}'
+    assert strip_fences(raw) == '{"key": "value"}'
 
 
 def test_strip_fences_passthrough_plain_json():
     raw = '{"key": "value"}'
-    assert _strip_fences(raw) == raw
+    assert strip_fences(raw) == raw
+
+
+@patch("app.pipeline.extract.OpenAI")
+def test_extract_rejects_incomplete_extraction(mock_openai_cls):
+    """A response missing a field must error, not write empty strings as 'done'."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(
+        {"problem": "A problem.", "method": "A method."}  # no results/contribution
+    )
+    mock_openai_cls.return_value = mock_client
+
+    result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
+
+    assert errors == 1
+    assert result[0].extract_status == "error"
+    assert result[0].problem is None
+
+
+@patch("app.pipeline.extract.OpenAI")
+def test_extract_rejects_empty_string_fields(mock_openai_cls):
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(
+        {**_EXTRACTION, "results": ""}
+    )
+    mock_openai_cls.return_value = mock_client
+
+    result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
+
+    assert errors == 1
+    assert result[0].extract_status == "error"
+
+
+@patch("app.pipeline.extract.OpenAI")
+def test_extract_accumulates_token_usage(mock_openai_cls):
+    response = _fake_response(_EXTRACTION)
+    response.usage.prompt_tokens = 100
+    response.usage.completion_tokens = 40
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = response
+    mock_openai_cls.return_value = mock_client
+
+    _, _, errors, prompt_tokens, completion_tokens = extract_papers(
+        [_make_paper("2401.0001"), _make_paper("2401.0002")]
+    )
+
+    assert errors == 0
+    assert prompt_tokens == 200
+    assert completion_tokens == 80

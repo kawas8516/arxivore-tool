@@ -125,3 +125,82 @@ reviewed the codebase against [`security.md`](security.md).
   reflect the free tier, not a paid provider.
 - Wiring `response.usage` through the three LLM stages is the next instrumentation
   target — it also unlocks enforcement of `DAILY_TOKEN_BUDGET` (lapse #3).
+
+---
+
+# Correctness & Instrumentation Build — v0.2.0
+
+Audit-driven batch. Full findings list in [`IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md)
+(33 findings: 24 from code review, 6 from a DeepWiki docs audit, 3 from the live
+OpenRouter catalog).
+
+## Root cause found for the v0.1.1 model failures
+
+`RELEASE.md` above recorded *"the originally-pinned model IDs hit account
+data-policy / 404 errors"* without identifying which. Querying all 414 models in
+the OpenRouter catalog settled it:
+
+| Configured ID | Status |
+|---|---|
+| `meta-llama/llama-3.3-70b-instruct:free` | **withdrawn — does not exist** |
+| `meta-llama/llama-3.3-70b-instruct` (paid) | exists, $0.10 / $0.32 per 1M |
+| `nvidia/nemotron-3-ultra-550b-a55b:free` | valid, free, 1M context |
+
+The `:free` variant of Llama 3.3 70B had been retired. Because `extract.py`
+reused `LLM_RERANK_MODEL`, a fresh clone had a broken rerank **and** extract
+stage while the docs still shipped the dead ID.
+
+## Fixed
+
+| # | Area | Issue | Fix |
+|---|---|---|---|
+| P0-1 | Correctness | `rerank.py` alone had no markdown-fence stripping, so a fenced response became a hard `502` that discarded the whole run | Shared `app/pipeline/_json.py`; all four stages now use one parse path |
+| P0-2 | Config | Default rerank/extract model withdrawn from the provider catalog | Defaults → `nvidia/nemotron-3-super-120b-a12b:free`; opt-in `pytest -m live_models` asserts every configured ID still exists |
+| P1-1 | Retrieval | Plain-English topic passed straight into arXiv's boolean API — the exact weakness `PRD.md` was written to solve | New stage 0 `expand.py`: one call → ~5 arXiv-syntax queries, unioned and deduped. Falls back to the raw topic, so it can only widen recall |
+| P1-2 | Correctness | `.get()` with silent defaults meant a garbage response produced empty fields marked `extract_status="done"` | `RerankItem`, `ExtractionOut`, `ExpandOut` Pydantic contracts; failures become honest per-paper errors |
+| P1-4 | Correctness | `{}` from synthesis validated as a successful-but-blank landscape | `Landscape.clusters` now requires ≥1 entry |
+| P1-5 | Correctness | Prompt demanded grounded `arxiv_id`s and real cluster names; nothing verified it | Post-validation prunes invented ids and dangling relationship endpoints, and logs what it dropped |
+| P1-6 | Testing | No way to tell whether a change helped | `backend/evals/` regression harness — offline mode, deterministic fixtures, committed baseline |
+| P2-2 | Performance | `_MAX_WORKERS = 2` hardcoded while docs claimed 5 | `EXTRACT_CONCURRENCY` setting (default 3) |
+| P2-3 | Observability | `response.usage` discarded by every stage, so `DAILY_TOKEN_BUDGET` was unenforceable | Usage threaded through all stages into `SearchResponse`; new `app/budget.py` ledger enforces the ceiling → `429`. **Closes security lapse #3** |
+| P2-5 | Correctness | `arxiv_id` kept its `v2` suffix, so revisions were distinct ids | Canonical id strips the version; the versioned form still links to arXiv |
+| P3-3 | Robustness | Rate-limiter dict grew one key per unique IP forever | Periodic sweep of inactive IPs |
+| P5-6 | Config | Extraction silently reused the rerank model | Separate `LLM_EXTRACT_MODEL` / `LLM_EXPAND_MODEL`, as `PRD.md` §12 asked |
+
+## Still open (accepted for single-user v1)
+
+- **No CI** secret scanning / dependency audit (`gitleaks`, `pip-audit`).
+- **No persistence** — SQLite cache + reading map (FR10/FR11) blocked on the
+  cross-run dedup decision in `PRD.md` §12. `arxiv_id` normalisation landed now so
+  the cache has a correct key when it is built.
+- **Sync pipeline** — `POST /api/search` still blocks for the whole run; async +
+  SSE (FR3/FR4) not yet done, so the `<90s` NFR is still missed on free models.
+- **CDN supply chain** — Alpine loads from a floating `@3.x.x` tag with no
+  integrity hash.
+
+## Models Used
+
+| Role | Model |
+|------|-------|
+| Development | Claude Sonnet 5 |
+| Expand + Rerank + Extract | `nvidia/nemotron-3-super-120b-a12b:free` |
+| Synthesis | `nvidia/nemotron-3-ultra-550b-a55b:free` |
+
+All defaults remain free-tier. Switching rerank/extract/expand to
+`openai/gpt-oss-120b` costs ~$0.0025/run (~30k in, ~9.4k out) and removes the
+3–5 minute wall — documented in `.env.example` but not the default.
+
+## Tests Run
+
+- **54 unit tests, 54 passed** (up from 11), plus 1 opt-in live catalog check.
+- New modules: `test_json.py`, `test_expand.py`, `test_budget.py`,
+  `test_search_api.py`, `test_config.py`.
+- New regression coverage for each fixed defect: fenced rerank JSON, off-schema
+  extraction, empty landscape, hallucinated cross-references, `arxiv_id` version
+  stripping, multi-query dedup, rate-limiter sweep, budget `429`.
+- **Offline eval** — `python -m evals.run --offline`: 3 topics, 50 candidates each,
+  18/18 extraction, 2 clusters, byte-identical token totals across runs.
+
+> Determinism note: the fixtures use `zlib.crc32` rather than `hash()`. Python
+> randomises string hashing per process, which made offline token counts drift
+> between runs and left the baseline undiffable.

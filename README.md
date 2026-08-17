@@ -1,5 +1,9 @@
 # Arxivore
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kawas8516/arxivore-tool)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg)](https://www.python.org/downloads/)
+
 Map an entire ML research field from a single plain-English search.
 
 Enter a topic — the agent pulls papers from arXiv, reranks them by semantic
@@ -84,14 +88,16 @@ map grows over time as you run more searches.
 ### Prerequisites
 
 - Python ≥ 3.11
-- Node.js ≥ 20
-- An Anthropic API key
+- An OpenRouter API key (free tier works — get one at
+  [openrouter.ai](https://openrouter.ai))
+
+No Node required: the UI is a single static page served by FastAPI.
 
 ### 1. Clone and configure
 
 ```bash
 git clone <repo-url>
-cd patch-search
+cd arxivore-tool
 cp .env.example .env
 # Open .env and set LLM_API_KEY=sk-or-... (get one free at openrouter.ai)
 ```

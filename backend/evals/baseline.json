@@ -1,0 +1,99 @@
+{
+  "mode": "offline",
+  "summary": {
+    "topics_run": 3,
+    "hard_failures": 0,
+    "landscapes_produced": 3,
+    "mean_candidates_retrieved": 50,
+    "mean_papers_retained": 18,
+    "total_papers_unscored": 0,
+    "total_extract_errors": 0,
+    "mean_extract_completion_pct": 100.0,
+    "mean_total_tokens": 12075.3,
+    "total_tokens": 36226,
+    "mean_total_ms": 4
+  },
+  "runs": [
+    {
+      "topic": "retrieval-augmented generation",
+      "hard_failure": null,
+      "queries_issued": 4,
+      "candidates_retrieved": 50,
+      "papers_retained": 18,
+      "papers_unscored": 0,
+      "extract_ok": 18,
+      "extract_errors": 0,
+      "extract_completion_pct": 100.0,
+      "landscape": true,
+      "clusters": 2,
+      "relationships": 1,
+      "tensions": 1,
+      "open_problems": 1,
+      "prompt_tokens": 8270,
+      "completion_tokens": 3870,
+      "total_tokens": 12140,
+      "ms": {
+        "expand": 0,
+        "retrieve": 0,
+        "rerank": 2,
+        "extract": 2,
+        "synthesize": 0
+      },
+      "total_ms": 8
+    },
+    {
+      "topic": "diffusion policy learning",
+      "hard_failure": null,
+      "queries_issued": 4,
+      "candidates_retrieved": 50,
+      "papers_retained": 18,
+      "papers_unscored": 0,
+      "extract_ok": 18,
+      "extract_errors": 0,
+      "extract_completion_pct": 100.0,
+      "landscape": true,
+      "clusters": 2,
+      "relationships": 1,
+      "tensions": 1,
+      "open_problems": 1,
+      "prompt_tokens": 8041,
+      "completion_tokens": 3870,
+      "total_tokens": 11911,
+      "ms": {
+        "expand": 0,
+        "retrieve": 0,
+        "rerank": 0,
+        "extract": 1,
+        "synthesize": 0
+      },
+      "total_ms": 2
+    },
+    {
+      "topic": "state space models for language",
+      "hard_failure": null,
+      "queries_issued": 4,
+      "candidates_retrieved": 50,
+      "papers_retained": 18,
+      "papers_unscored": 0,
+      "extract_ok": 18,
+      "extract_errors": 0,
+      "extract_completion_pct": 100.0,
+      "landscape": true,
+      "clusters": 2,
+      "relationships": 1,
+      "tensions": 1,
+      "open_problems": 1,
+      "prompt_tokens": 8305,
+      "completion_tokens": 3870,
+      "total_tokens": 12175,
+      "ms": {
+        "expand": 0,
+        "retrieve": 0,
+        "rerank": 0,
+        "extract": 1,
+        "synthesize": 0
+      },
+      "total_ms": 2
+    }
+  ]
+}
