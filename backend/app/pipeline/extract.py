@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
@@ -57,7 +58,9 @@ def _extract_one(paper: Paper, client: OpenAI, model: str, fallback_model: str) 
     return prompt_tokens, completion_tokens
 
 
-def extract_papers(papers: list[Paper]) -> tuple[list[Paper], int, int, int, int]:
+def extract_papers(
+    papers: list[Paper], on_progress: Callable[[int, int], None] | None = None
+) -> tuple[list[Paper], int, int, int, int]:
     """Extract structured info for each paper concurrently.
 
     A paper already cached from an earlier run (same arxiv_id, any topic) is
@@ -65,6 +68,10 @@ def extract_papers(papers: list[Paper]) -> tuple[list[Paper], int, int, int, int
     actually pays for itself, not in the schema. Everything else goes through
     the LLM and, on success or failure, is written back to storage so the next
     run that retrieves it benefits.
+
+    on_progress, if given, is called as (done, total) after every paper
+    completes (cache hits count immediately, in-flight ones as they finish) —
+    the source for SSE's live "extract: done=11 total=18" progress.
 
     Returns (papers, elapsed_ms, error_count, prompt_tokens, completion_tokens).
     A single paper failure never raises — it marks that paper
@@ -78,6 +85,16 @@ def extract_papers(papers: list[Paper]) -> tuple[list[Paper], int, int, int, int
     prompt_tokens = 0
     completion_tokens = 0
 
+    total = len(papers)
+    done_count = 0
+
+    def _report_progress() -> None:
+        if on_progress is not None:
+            try:
+                on_progress(done_count, total)
+            except Exception:
+                logger.exception("on_progress callback raised — ignoring")
+
     to_fetch: list[Paper] = []
     cache_hits = 0
     for paper in papers:
@@ -89,6 +106,8 @@ def extract_papers(papers: list[Paper]) -> tuple[list[Paper], int, int, int, int
             paper.contribution = cached.contribution
             paper.extract_status = "done"
             cache_hits += 1
+            done_count += 1
+            _report_progress()
         else:
             to_fetch.append(paper)
 
@@ -129,6 +148,8 @@ def extract_papers(papers: list[Paper]) -> tuple[list[Paper], int, int, int, int
                     storage.save_extraction(paper)
                 except Exception:
                     logger.exception("failed to cache extraction arxiv_id=%s", paper.arxiv_id)
+                done_count += 1
+                _report_progress()
 
     elapsed_ms = int((time.monotonic() - start) * 1000)
     done = len(papers) - error_count

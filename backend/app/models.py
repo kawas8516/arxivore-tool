@@ -98,6 +98,15 @@ class Landscape(BaseModel):
     open_problems: list[str] = []
 
 
+class SearchAccepted(BaseModel):
+    """Immediate response from POST /api/search — the pipeline runs in the
+    background; poll GET /api/runs/{run_id} or subscribe to
+    GET /api/runs/{run_id}/stream for progress and results."""
+
+    run_id: str
+    state: str = "QUEUED"
+
+
 class SearchResponse(BaseModel):
     run_id: str = ""
     topic: str

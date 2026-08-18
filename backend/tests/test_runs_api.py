@@ -1,7 +1,9 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
-from app import storage
+from app import run_status, storage
 from app.main import app
 from app.models import Author, Cluster, Landscape, Paper, SearchResponse
 
@@ -125,3 +127,28 @@ def test_patch_paper_422_for_invalid_status(client):
     _seed_run("run-1")
     response = client.patch("/api/papers/2401.0001", json={"read_status": "not-a-real-status"})
     assert response.status_code == 422
+
+
+def test_stream_404_for_unknown_run(client):
+    assert client.get("/api/runs/does-not-exist/stream").status_code == 404
+
+
+def test_stream_emits_events_until_terminal(client):
+    run_status.start("run-1", "a topic")
+    run_status.set_state("run-1", "RETRIEVING")
+    run_status.set_stage("run-1", "retrieve", status="done", count=5, ms=10)
+    run_status.set_state("run-1", "COMPLETE")
+
+    with client.stream("GET", "/api/runs/run-1/stream") as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = []
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[len("data: ") :]))
+
+    # Every distinct seq up to and including the terminal one is present.
+    assert events[-1]["state"] == "COMPLETE"
+    assert events[-1]["stages"]["retrieve"]["count"] == 5
+    states_seen = [e["state"] for e in events]
+    assert "COMPLETE" in states_seen

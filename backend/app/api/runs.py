@@ -5,16 +5,26 @@ here, so they don't need the /api/search rate limit, concurrency cap, or token
 budget guard.
 """
 
+import json
 import logging
+import time
+from collections.abc import Generator
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app import storage
+from app import run_status, storage
 from app.models import Landscape, Paper
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# How often the stream re-checks run_status for changes. run_status.get() is an
+# in-memory dict read under a lock — cheap enough that a short poll interval
+# costs nothing measurable at this scale; no need for condition variables.
+_POLL_INTERVAL_SECONDS = 0.3
+_TERMINAL_STATES = ("COMPLETE", "FAILED")
 
 
 class RunSummary(BaseModel):
@@ -69,6 +79,38 @@ def get_run_papers(run_id: str) -> list[Paper]:
 @router.get("/runs/{run_id}/landscape", response_model=Landscape | None)
 def get_run_landscape(run_id: str) -> Landscape | None:
     return _get_run_or_404(run_id)["landscape"]
+
+
+def _sse_event(snapshot: dict) -> str:
+    return f"data: {json.dumps(snapshot)}\n\n"
+
+
+def _stream_events(run_id: str) -> Generator[str, None, None]:
+    last_seq = -1
+    while True:
+        snapshot = run_status.get(run_id)
+        if snapshot is None:
+            # Run finished and was swept, or (shouldn't happen — checked
+            # before streaming starts) never existed. Either way, stop.
+            break
+        if snapshot["seq"] != last_seq:
+            last_seq = snapshot["seq"]
+            yield _sse_event(snapshot)
+        if snapshot["state"] in _TERMINAL_STATES:
+            break
+        time.sleep(_POLL_INTERVAL_SECONDS)
+
+
+@router.get("/runs/{run_id}/stream")
+def stream_run(run_id: str) -> StreamingResponse:
+    """Live stage-by-stage progress, matching ARCHITECTURE.md section 3's state
+    machine (QUEUED -> RETRIEVING -> RERANKING -> EXTRACTING -> SYNTHESIZING ->
+    COMPLETE | FAILED). Sourced from run_status, not storage — a run is only
+    persisted once it finishes, so this is the only way to see it in progress.
+    """
+    if run_status.get(run_id) is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return StreamingResponse(_stream_events(run_id), media_type="text/event-stream")
 
 
 @router.patch("/papers/{arxiv_id}")
