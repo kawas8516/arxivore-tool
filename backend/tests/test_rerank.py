@@ -120,6 +120,69 @@ def test_rerank_tolerates_unscored_candidate(mock_openai_cls):
 
 
 @patch("app.pipeline.rerank.OpenAI")
+def test_rerank_batches_candidates_above_batch_size(mock_openai_cls):
+    """22 candidates at a batch size of 15 must issue 2 calls, not 1 giant one."""
+    candidates = [_make_paper(f"2401.{i:04d}") for i in range(22)]
+    mock_client = MagicMock()
+
+    def side_effect(*, model, max_tokens, messages, response_format=None):
+        user = messages[-1]["content"]
+        ids = [c.arxiv_id for c in candidates if c.arxiv_id in user]
+        return _fake_llm_response(
+            [{"arxiv_id": i, "score": 0.5, "rationale": "ok"} for i in ids]
+        )
+
+    mock_client.chat.completions.create.side_effect = side_effect
+    mock_openai_cls.return_value = mock_client
+
+    ranked, _, _, _ = rerank_candidates("test topic", candidates)
+
+    assert mock_client.chat.completions.create.call_count == 2  # ceil(22/15)
+    assert all(p.relevance_score == 0.5 for p in ranked)
+
+
+@patch("app.pipeline.rerank.OpenAI")
+def test_rerank_one_failed_batch_does_not_sink_the_others(mock_openai_cls):
+    """A batch that errors out leaves its papers unscored; other batches still score."""
+    candidates = [_make_paper(f"2401.{i:04d}") for i in range(20)]
+
+    def side_effect(*, model, max_tokens, messages, response_format=None):
+        user = messages[-1]["content"]
+        if "2401.0000" in user:  # first batch — force a schema failure
+            return _fake_llm_response([{"arxiv_id": "2401.0000", "score": 9.9, "rationale": "x"}])
+        ids = [c.arxiv_id for c in candidates if c.arxiv_id in user]
+        return _fake_llm_response(
+            [{"arxiv_id": i, "score": 0.7, "rationale": "ok"} for i in ids]
+        )
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = side_effect
+    mock_openai_cls.return_value = mock_client
+
+    # Inspect `candidates` directly, not the returned `ranked` slice: with 20
+    # candidates and the default max_retained_papers=18, the slice would drop 2
+    # unscored papers and make the counts below look wrong for the wrong reason.
+    rerank_candidates("test topic", candidates)
+
+    scored = [p for p in candidates if p.relevance_score is not None]
+    unscored = [p for p in candidates if p.relevance_score is None]
+    assert len(scored) == 5  # second batch (indices 15-19) scored fine
+    assert len(unscored) == 15  # first batch (indices 0-14) all failed together
+
+
+@patch("app.pipeline.rerank.OpenAI")
+def test_rerank_all_batches_failing_raises(mock_openai_cls):
+    """Total rerank failure must still surface, not silently succeed unranked."""
+    candidates = [_make_paper(f"2401.{i:04d}") for i in range(3)]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = RuntimeError("provider down")
+    mock_openai_cls.return_value = mock_client
+
+    with pytest.raises(LLMOutputError):
+        rerank_candidates("test topic", candidates)
+
+
+@patch("app.pipeline.rerank.OpenAI")
 def test_rerank_falls_back_to_secondary_model_on_rate_limit(mock_openai_cls, monkeypatch):
     import os
     from app.config import get_settings

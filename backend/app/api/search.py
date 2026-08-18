@@ -82,7 +82,7 @@ def search(request: SearchRequest, http_request: Request) -> SearchResponse:
             detail="Server is busy with other searches. Please try again shortly.",
         )
     try:
-        return run_pipeline(request.topic)
+        return run_pipeline(request.topic, request.published_after)
     except PipelineError as exc:
         raise HTTPException(status_code=502, detail=exc.message) from exc
     finally:

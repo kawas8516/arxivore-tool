@@ -9,9 +9,9 @@
     "total_papers_unscored": 0,
     "total_extract_errors": 0,
     "mean_extract_completion_pct": 100.0,
-    "mean_total_tokens": 12075.3,
-    "total_tokens": 36226,
-    "mean_total_ms": 4
+    "mean_total_tokens": 12520.3,
+    "total_tokens": 37561,
+    "mean_total_ms": 8
   },
   "runs": [
     {
@@ -29,17 +29,17 @@
       "relationships": 1,
       "tensions": 1,
       "open_problems": 1,
-      "prompt_tokens": 8270,
+      "prompt_tokens": 8717,
       "completion_tokens": 3870,
-      "total_tokens": 12140,
+      "total_tokens": 12587,
       "ms": {
         "expand": 0,
         "retrieve": 0,
-        "rerank": 2,
+        "rerank": 5,
         "extract": 2,
         "synthesize": 0
       },
-      "total_ms": 8
+      "total_ms": 11
     },
     {
       "topic": "diffusion policy learning",
@@ -56,17 +56,17 @@
       "relationships": 1,
       "tensions": 1,
       "open_problems": 1,
-      "prompt_tokens": 8041,
+      "prompt_tokens": 8484,
       "completion_tokens": 3870,
-      "total_tokens": 11911,
+      "total_tokens": 12354,
       "ms": {
         "expand": 0,
         "retrieve": 0,
-        "rerank": 0,
-        "extract": 1,
+        "rerank": 1,
+        "extract": 2,
         "synthesize": 0
       },
-      "total_ms": 2
+      "total_ms": 4
     },
     {
       "topic": "state space models for language",
@@ -83,17 +83,17 @@
       "relationships": 1,
       "tensions": 1,
       "open_problems": 1,
-      "prompt_tokens": 8305,
+      "prompt_tokens": 8750,
       "completion_tokens": 3870,
-      "total_tokens": 12175,
+      "total_tokens": 12620,
       "ms": {
         "expand": 0,
         "retrieve": 0,
-        "rerank": 0,
-        "extract": 1,
+        "rerank": 1,
+        "extract": 6,
         "synthesize": 0
       },
-      "total_ms": 2
+      "total_ms": 9
     }
   ]
 }

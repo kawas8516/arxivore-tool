@@ -9,7 +9,7 @@ from app.main import app
 from app.models import SearchResponse
 
 
-def _empty_response(topic: str) -> SearchResponse:
+def _empty_response(topic: str, published_after=None) -> SearchResponse:
     return SearchResponse(
         topic=topic,
         candidates_retrieved=0,
@@ -46,6 +46,25 @@ def test_search_returns_pipeline_result(client):
 
 def test_short_topic_is_rejected(client):
     response = client.post("/api/search", json={"topic": "ab"})
+    assert response.status_code == 422
+
+
+def test_published_after_is_forwarded_to_pipeline(client):
+    with patch("app.api.search.run_pipeline", side_effect=_empty_response) as mock_run:
+        response = client.post(
+            "/api/search", json={"topic": "diffusion policy", "published_after": "2024-01-01"}
+        )
+
+    assert response.status_code == 200
+    from datetime import date
+
+    mock_run.assert_called_once_with("diffusion policy", date(2024, 1, 1))
+
+
+def test_malformed_published_after_is_rejected(client):
+    response = client.post(
+        "/api/search", json={"topic": "diffusion policy", "published_after": "not-a-date"}
+    )
     assert response.status_code == 422
 
 

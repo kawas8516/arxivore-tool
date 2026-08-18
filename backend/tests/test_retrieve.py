@@ -1,10 +1,15 @@
 from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from app.pipeline.retrieve import retrieve_candidates
 
 
-def _make_arxiv_result(arxiv_id: str, title: str = "Test Paper", abstract: str = "Stuff."):
+def _make_arxiv_result(
+    arxiv_id: str,
+    title: str = "Test Paper",
+    abstract: str = "Stuff.",
+    published: datetime = datetime(2024, 1, 15, tzinfo=timezone.utc),
+):
     result = MagicMock()
     result.entry_id = f"https://arxiv.org/abs/{arxiv_id}"
     result.title = title
@@ -14,7 +19,7 @@ def _make_arxiv_result(arxiv_id: str, title: str = "Test Paper", abstract: str =
     author_a.name, author_b.name = "Alice", "Bob"
     result.authors = [author_a, author_b]
     result.categories = ["cs.LG"]
-    result.published = datetime(2024, 1, 15, tzinfo=timezone.utc)
+    result.published = published
     return result
 
 
@@ -91,6 +96,33 @@ def test_retrieve_survives_one_failing_query(mock_client_cls):
     papers, _ = retrieve_candidates(["bad query", "good query"])
 
     assert [p.arxiv_id for p in papers] == ["2401.00002"]
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_filters_out_papers_older_than_published_after(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.results.return_value = iter([
+        _make_arxiv_result("2401.00001", published=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+        _make_arxiv_result("2401.00002", published=datetime(2025, 6, 1, tzinfo=timezone.utc)),
+    ])
+    mock_client_cls.return_value = mock_client
+
+    papers, _ = retrieve_candidates("test topic", published_after=date(2024, 1, 1))
+
+    assert [p.arxiv_id for p in papers] == ["2401.00002"]
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_without_published_after_keeps_everything(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.results.return_value = iter([
+        _make_arxiv_result("2401.00001", published=datetime(2016, 1, 1, tzinfo=timezone.utc)),
+    ])
+    mock_client_cls.return_value = mock_client
+
+    papers, _ = retrieve_candidates("test topic")
+
+    assert [p.arxiv_id for p in papers] == ["2401.00001"]
 
 
 @patch("app.pipeline.retrieve.arxiv.Client")

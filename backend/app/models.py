@@ -1,8 +1,14 @@
+from datetime import date
+
 from pydantic import BaseModel, Field, field_validator
 
 
 class SearchRequest(BaseModel):
     topic: str = Field(..., min_length=3, max_length=300)
+    # Optional recency floor. arXiv's Relevance sort has no native date-range
+    # query, so this is applied as a post-filter in retrieve.py — without it, a
+    # 2016 paper can outrank 2025 SOTA on relevance alone.
+    published_after: date | None = None
 
     @field_validator("topic")
     @classmethod

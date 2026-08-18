@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 from app import budget
 from app.models import SearchResponse
@@ -20,7 +21,7 @@ class PipelineError(Exception):
         super().__init__(f"{stage}: {message}")
 
 
-def run_pipeline(topic: str) -> SearchResponse:
+def run_pipeline(topic: str, published_after: date | None = None) -> SearchResponse:
     """Run the full expand -> retrieve -> rerank -> extract -> synthesize pipeline.
 
     Raises PipelineError on a hard failure (retrieve or rerank). Expansion,
@@ -39,7 +40,7 @@ def run_pipeline(topic: str) -> SearchResponse:
     completion_tokens += used_completion
 
     try:
-        candidates, retrieve_ms = retrieve_candidates(queries)
+        candidates, retrieve_ms = retrieve_candidates(queries, published_after)
     except Exception as exc:
         logger.exception("retrieve failed topic=%r", topic)
         raise PipelineError("retrieve", "Failed to retrieve papers from arXiv") from exc

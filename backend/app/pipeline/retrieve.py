@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from datetime import date
 
 import arxiv
 
@@ -38,13 +39,20 @@ def _to_paper(result) -> Paper:
     )
 
 
-def retrieve_candidates(queries: str | list[str]) -> tuple[list[Paper], int]:
+def retrieve_candidates(
+    queries: str | list[str], published_after: date | None = None
+) -> tuple[list[Paper], int]:
     """Retrieve candidates for one or more arXiv queries.
 
     Results are unioned and deduped on the canonical arxiv_id, keeping the first
     occurrence — queries are ordered most- to least-faithful to the user's topic,
     so earlier hits win. The max_candidates cap applies to the union, keeping cost
     bounded regardless of how many queries were issued.
+
+    published_after is a post-filter: arXiv's Relevance sort (the only sort that
+    makes sense for a topic search) has no native date-range query, so papers
+    older than the cutoff are fetched and then dropped rather than excluded at
+    the API level.
     """
     settings = get_settings()
     if isinstance(queries, str):
@@ -79,16 +87,26 @@ def retrieve_candidates(queries: str | list[str]) -> tuple[list[Paper], int]:
             continue
 
         added = 0
+        skipped_old = 0
         for result in results:
             if len(papers) >= settings.max_candidates:
                 break
+            if published_after is not None and result.published.date() < published_after:
+                skipped_old += 1
+                continue
             paper = _to_paper(result)
             if paper.arxiv_id in seen:
                 continue
             seen.add(paper.arxiv_id)
             papers.append(paper)
             added += 1
-        logger.debug("arxiv query=%r hits=%d new=%d", full_query, len(results), added)
+        logger.debug(
+            "arxiv query=%r hits=%d new=%d skipped_old=%d",
+            full_query,
+            len(results),
+            added,
+            skipped_old,
+        )
 
     elapsed_ms = int((time.monotonic() - start) * 1000)
     logger.info(
