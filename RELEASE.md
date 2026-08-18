@@ -262,3 +262,65 @@ Both documented in `storage.py`'s module docstring:
   (rerank batching changed the token shape; persistence caching reduced it via
   genuine cross-topic reuse in the fixture data) and unchanged for both
   opt-in features, since neither is exercised while disabled.
+
+---
+
+# Static UI Hardening — v0.4.0
+
+Closes P3-2, P4-3, P4-4 and — found in the course of fixing them — repairs a
+regression the v0.3.0 async-pipeline change introduced but never applied to
+`backend/app/static/index.html`.
+
+## The regression this batch actually opened with
+
+`POST /api/search` had already changed to return `{run_id, state}`
+immediately instead of the full result (v0.3.0), but the static page's
+`search()` still did `this.result = await res.json()` expecting the old
+synchronous `SearchResponse`. **The static UI was non-functional on this
+branch** independent of P3-2/P4-3/P4-4 — fixed as part of this batch rather
+than left as a separate surprise.
+
+## Closed
+
+| # | What changed |
+|---|---|
+| — (regression) | `static/app.js` (new): `search()` now follows the real flow — `POST /api/search` → `{run_id}` → subscribe to `GET /api/runs/{run_id}/stream` (SSE) for live stage progress → on `COMPLETE`, fetch `GET /api/runs/{run_id}` (the storage-backed result) and render. The stats bar's `candidates_retrieved`/`papers_returned`/`extract_errors` fields don't exist on the storage-backed `RunDetail` (only on the old `SearchResponse`) — replaced with `papers.length` and a client-side count of `extract_status === "error"` |
+| P3-2 | A `setTimeout` ceiling (8 min — above the documented 3–5 min free-tier run time) closes the SSE stream and shows a timeout error if no terminal state arrives; a separate `AbortController` bounds the initial POST itself |
+| P4-4 | Alpine (3.16.2) and the Tailwind Play script (3.4.17) vendored locally under `static/vendor/` — pinned exact versions, no CDN network dependency, no floating tag to drift on |
+| P4-3 | CSP: both external CDN origins dropped; `unsafe-inline` dropped from `script-src` (the page's JS is now external `app.js`, not an inline block). `unsafe-eval` (Alpine's `new Function()`-based expression evaluation) and `style-src`'s `unsafe-inline` (Tailwind Play's runtime JIT style injection) stay — both are architectural to the tools themselves, not a CDN-loading artifact, and can't be dropped without a real build step that would contradict this UI's "no Node build" design |
+
+## A bug found by actually loading the page, not by reading the diff
+
+Browser-console verification (not just `curl` status codes) caught a real
+defer-ordering bug `curl` could never see: Alpine's `<script defer>` sits in
+`<head>`, and deferred scripts execute in **document order**, not head/body
+position. With `app.js`'s tag at the bottom of `<body>`, Alpine's script ran
+*first* and called `mapper()` before it existed — `ReferenceError: mapper is
+not defined`, cascading into every Alpine-bound expression on the page.
+Fixed by moving `app.js`'s tag before Alpine's in document order.
+
+Also fixed while verifying this exact region: `<template x-for="p in
+result.papers">` had no null guard, unlike its sibling `x-show="result?.
+papers?.length"` right next to it — threw on every initial page load (before
+any search) since `result` starts `null`. One-token fix:
+`x-for="p in (result?.papers ?? [])"`.
+
+## Still open (deliberately)
+
+- **P3-4** (trusted `X-Forwarded-For`) — depends on whether the Gradio Space
+  calls this API directly or through a proxy; deployment topology still
+  undecided.
+- **P5-8** (Next.js) — UI framework choice; dead work now that Gradio is the
+  real front end.
+
+## Tests Run
+
+- **129 unit tests, 129 passed** — unchanged; this batch touched only static
+  assets (`index.html`, `app.js`, `vendor/`) and `main.py`'s CSP string, no
+  Python logic.
+- **Live browser verification** (not just `pytest`): server started locally,
+  page loaded in a real Chrome tab via `claude-in-chrome`, console read for
+  errors before and after each fix. This is what caught both bugs above —
+  neither would show up in `curl -I` status-code checks or in a diff review.
+- Vendor assets and `app.js` confirmed serving `200` from the local static
+  mount (not a CDN redirect) via direct request.

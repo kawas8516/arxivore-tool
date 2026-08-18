@@ -5,14 +5,20 @@ token-efficient**. Every row cites a real `file:line` so a fix can start without
 re-investigation.
 
 **Status:** the audit below is the original snapshot and is left unedited for
-history. See `RELEASE.md` v0.2.0 and v0.3.0 for what's actually landed —
-**15 of the original 33 findings are now closed**: P0-1, P0-2, P1-1, P1-2,
-P1-3, P1-4, P1-5, P1-6, P1-7, P2-1, P2-2, P2-3, P2-4, P2-5, P2-6, P3-1, P3-3,
-P3-5, P3-6, P4-1, P5-1, P5-2, P5-3, P5-4, P5-6, P5-7. P5-5 was evaluated and
+history. See `RELEASE.md` v0.2.0 through v0.4.0 for what's actually landed —
+**19 of the original 33 findings are now closed**: P0-1, P0-2, P1-1, P1-2,
+P1-3, P1-4, P1-5, P1-6, P1-7, P2-1, P2-2, P2-3, P2-4, P2-5, P2-6, P3-1, P3-2,
+P3-3, P3-5, P3-6, P4-1, P4-2, P4-3, P4-4, P5-1, P5-2, P5-3, P5-4, P5-6, P5-7.
+(P4-2 — spend-ceiling enforcement — was actually closed in the very first
+batch, before the session that produced this plan's other tracking; it was
+never marked here until this pass caught the gap.) P5-5 was evaluated and
 found not-yet-applicable (no cross-run synthesis feature exists yet to bound —
-see the Phase 1 note in `RELEASE.md`). Remaining open, by design choice this
-session (UI is now Gradio; CORS/CDN/deployment topology explicitly left
-as-is): P3-2, P3-4, P4-3, P4-4, P5-8.
+see the Phase 1 note in `RELEASE.md`). Remaining open, by explicit decision
+this session (deployment topology and UI framework choice are still not
+decisions to make in-repo): **P3-4** (trusted X-Forwarded-For — depends on
+whether the Gradio Space ends up calling this API directly or through a
+proxy, undecided) and **P5-8** (Next.js migration — dead work now that
+Gradio is the real front end).
 
 **How findings were sourced:**
 
