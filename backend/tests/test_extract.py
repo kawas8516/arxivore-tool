@@ -1,8 +1,10 @@
 import json
 import httpx
 import openai
+import pytest
 from unittest.mock import MagicMock, patch
 
+from app import storage
 from app.models import Author, Paper
 from app.pipeline.extract import extract_papers
 from app.pipeline._json import strip_fences
@@ -12,6 +14,17 @@ def _rate_limit_error() -> openai.RateLimitError:
     request = httpx.Request("POST", "https://example.com")
     response = httpx.Response(429, request=request)
     return openai.RateLimitError("rate limited", response=response, body=None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_storage(monkeypatch):
+    """Every test in this file is about the LLM path, not persistence.
+
+    Without this, extract_papers would hit a real SQLite file per call. Tests
+    that specifically exercise caching override these within their own body.
+    """
+    monkeypatch.setattr(storage, "get_cached_extraction", lambda arxiv_id: None)
+    monkeypatch.setattr(storage, "save_extraction", lambda paper: None)
 
 
 def _make_paper(arxiv_id: str) -> Paper:
@@ -153,6 +166,88 @@ def test_extract_falls_back_to_secondary_model_on_rate_limit(mock_openai_cls, mo
     calls = mock_client.chat.completions.create.call_args_list
     assert calls[0].kwargs["model"] != calls[1].kwargs["model"]
     assert calls[1].kwargs["model"] == "backup-model"
+
+
+def test_extract_serves_cached_paper_without_calling_llm(monkeypatch):
+    cached = Paper(
+        arxiv_id="2401.0001",
+        title="Cached Paper",
+        abstract="An abstract.",
+        authors=[Author(name="Alice")],
+        categories=["cs.LG"],
+        published="2024-01-01",
+        url="https://arxiv.org/abs/2401.0001",
+        problem="Cached problem.",
+        method="Cached method.",
+        results="Cached results.",
+        contribution="Cached contribution.",
+        extract_status="done",
+    )
+    monkeypatch.setattr(storage, "get_cached_extraction", lambda arxiv_id: cached)
+
+    with patch("app.pipeline.extract.OpenAI") as mock_openai_cls:
+        result, _, errors, prompt_tokens, completion_tokens = extract_papers(
+            [_make_paper("2401.0001")]
+        )
+        # A cache hit must never touch the LLM client at all.
+        mock_openai_cls.assert_not_called()
+
+    assert errors == 0
+    assert prompt_tokens == 0
+    assert completion_tokens == 0
+    assert result[0].problem == "Cached problem."
+    assert result[0].extract_status == "done"
+
+
+@patch("app.pipeline.extract.OpenAI")
+def test_extract_writes_successful_result_to_storage(mock_openai_cls, monkeypatch):
+    saved: list[Paper] = []
+    monkeypatch.setattr(storage, "save_extraction", lambda paper: saved.append(paper))
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
+    mock_openai_cls.return_value = mock_client
+
+    extract_papers([_make_paper("2401.0001")])
+
+    assert len(saved) == 1
+    assert saved[0].arxiv_id == "2401.0001"
+    assert saved[0].extract_status == "done"
+
+
+@patch("app.pipeline.extract.OpenAI")
+def test_extract_writes_failed_result_to_storage_too(mock_openai_cls, monkeypatch):
+    """A cached failure still avoids re-hitting a dead paper in a later run."""
+    saved: list[Paper] = []
+    monkeypatch.setattr(storage, "save_extraction", lambda paper: saved.append(paper))
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = RuntimeError("boom")
+    mock_openai_cls.return_value = mock_client
+
+    extract_papers([_make_paper("2401.0001")])
+
+    assert len(saved) == 1
+    assert saved[0].extract_status == "error"
+
+
+@patch("app.pipeline.extract.OpenAI")
+def test_extract_storage_write_failure_does_not_fail_the_paper(mock_openai_cls, monkeypatch):
+    """A broken cache write must degrade, not take down an otherwise-good result."""
+
+    def _boom(paper):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(storage, "save_extraction", _boom)
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
+    mock_openai_cls.return_value = mock_client
+
+    result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
+
+    assert errors == 0
+    assert result[0].extract_status == "done"
 
 
 @patch("app.pipeline.extract.OpenAI")

@@ -200,6 +200,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.offline:
         os.environ.setdefault("LLM_API_KEY", "offline-no-key-required")
 
+    # Eval runs get their own database, never the developer's real reading-map
+    # data: offline runs use synthetic papers that shouldn't pollute a real
+    # cache, and a live eval run's own reading-map writes shouldn't reshuffle a
+    # real one either. init_db() also only runs via the FastAPI lifespan in
+    # normal operation — the harness calls run_pipeline() directly, so it must
+    # create the schema itself.
+    os.environ.setdefault("DATABASE_URL", f"sqlite:///{_HERE / 'eval_data' / 'app.db'}")
+    from app.config import get_settings
+    from app import storage
+
+    get_settings.cache_clear()
+    storage.init_db()
+
     topics = _load_topics()
     if not args.full:
         topics = topics[: max(1, args.topics)]

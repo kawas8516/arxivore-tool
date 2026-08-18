@@ -1,7 +1,8 @@
 import logging
+import uuid
 from datetime import date
 
-from app import budget
+from app import budget, storage
 from app.models import SearchResponse
 from app.pipeline.expand import expand_query
 from app.pipeline.retrieve import retrieve_candidates
@@ -28,7 +29,8 @@ def run_pipeline(topic: str, published_after: date | None = None) -> SearchRespo
     extraction, and synthesis failures are tolerated and reflected in the
     response.
     """
-    logger.info("pipeline started topic=%r", topic)
+    run_id = uuid.uuid4().hex
+    logger.info("pipeline started run_id=%s topic=%r", run_id, topic)
 
     prompt_tokens = 0
     completion_tokens = 0
@@ -46,9 +48,10 @@ def run_pipeline(topic: str, published_after: date | None = None) -> SearchRespo
         raise PipelineError("retrieve", "Failed to retrieve papers from arXiv") from exc
 
     if not candidates:
-        logger.info("pipeline zero candidates topic=%r", topic)
+        logger.info("pipeline zero candidates run_id=%s topic=%r", run_id, topic)
         budget.add(prompt_tokens, completion_tokens)
-        return SearchResponse(
+        response = SearchResponse(
+            run_id=run_id,
             topic=topic,
             candidates_retrieved=0,
             papers_returned=0,
@@ -60,6 +63,8 @@ def run_pipeline(topic: str, published_after: date | None = None) -> SearchRespo
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
+        _save_run_best_effort(run_id, response)
+        return response
 
     try:
         ranked, rerank_ms, used_prompt, used_completion = rerank_candidates(topic, candidates)
@@ -114,7 +119,8 @@ def run_pipeline(topic: str, published_after: date | None = None) -> SearchRespo
         completion_tokens,
         budget.remaining(),
     )
-    return SearchResponse(
+    response = SearchResponse(
+        run_id=run_id,
         topic=topic,
         candidates_retrieved=len(candidates),
         papers_returned=len(papers),
@@ -130,3 +136,14 @@ def run_pipeline(topic: str, published_after: date | None = None) -> SearchRespo
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
+    _save_run_best_effort(run_id, response)
+    return response
+
+
+def _save_run_best_effort(run_id: str, response: SearchResponse) -> None:
+    """Persist a run's outcome. A storage failure must not fail an otherwise
+    successful pipeline run — the caller already has a good result in hand."""
+    try:
+        storage.save_run(run_id, response)
+    except Exception:
+        logger.exception("failed to persist run_id=%s", run_id)

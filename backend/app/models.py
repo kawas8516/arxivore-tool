@@ -99,6 +99,7 @@ class Landscape(BaseModel):
 
 
 class SearchResponse(BaseModel):
+    run_id: str = ""
     topic: str
     candidates_retrieved: int
     papers_returned: int

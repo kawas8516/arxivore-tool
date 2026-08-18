@@ -31,9 +31,17 @@ def _clean_state():
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    # TestClient(app) runs the real FastAPI lifespan, which now calls
+    # storage.init_db() — point it at a throwaway file so the test suite never
+    # touches the developer's real reading-map database.
+    from app.config import get_settings
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'test.db'}")
+    get_settings.cache_clear()
     with TestClient(app) as test_client:
         yield test_client
+    get_settings.cache_clear()
 
 
 def test_search_returns_pipeline_result(client):

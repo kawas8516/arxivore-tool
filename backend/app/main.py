@@ -6,8 +6,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app import storage
 from app.config import get_settings
 from app.api.search import router as search_router
+from app.api.runs import router as runs_router
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -34,6 +36,7 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_settings()  # fail fast on startup if required env vars are missing
+    storage.init_db()
     yield
 
 
@@ -43,9 +46,7 @@ _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _settings.cors_allow_origins.split(",")],
-    # PATCH isn't listed: no PATCH route exists yet. Add it back when
-    # PATCH /api/papers/{arxiv_id} (FR11) lands.
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Content-Type"],
 )
 
@@ -60,6 +61,7 @@ async def security_headers(request: Request, call_next):
 
 
 app.include_router(search_router, prefix="/api")
+app.include_router(runs_router, prefix="/api")
 
 # Serve the single-page UI at / (html=True serves index.html for the root).
 # Mounted last so it doesn't shadow /api routes.

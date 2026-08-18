@@ -9,9 +9,9 @@
     "total_papers_unscored": 0,
     "total_extract_errors": 0,
     "mean_extract_completion_pct": 100.0,
-    "mean_total_tokens": 12520.3,
-    "total_tokens": 37561,
-    "mean_total_ms": 8
+    "mean_total_tokens": 7262.3,
+    "total_tokens": 21787,
+    "mean_total_ms": 48
   },
   "runs": [
     {
@@ -29,17 +29,17 @@
       "relationships": 1,
       "tensions": 1,
       "open_problems": 1,
-      "prompt_tokens": 8717,
-      "completion_tokens": 3870,
-      "total_tokens": 12587,
+      "prompt_tokens": 5600,
+      "completion_tokens": 1710,
+      "total_tokens": 7310,
       "ms": {
         "expand": 0,
         "retrieve": 0,
-        "rerank": 5,
-        "extract": 2,
+        "rerank": 2,
+        "extract": 34,
         "synthesize": 0
       },
-      "total_ms": 11
+      "total_ms": 46
     },
     {
       "topic": "diffusion policy learning",
@@ -56,17 +56,17 @@
       "relationships": 1,
       "tensions": 1,
       "open_problems": 1,
-      "prompt_tokens": 8484,
-      "completion_tokens": 3870,
-      "total_tokens": 12354,
+      "prompt_tokens": 5425,
+      "completion_tokens": 1710,
+      "total_tokens": 7135,
       "ms": {
         "expand": 0,
         "retrieve": 0,
         "rerank": 1,
-        "extract": 2,
+        "extract": 40,
         "synthesize": 0
       },
-      "total_ms": 4
+      "total_ms": 60
     },
     {
       "topic": "state space models for language",
@@ -83,17 +83,17 @@
       "relationships": 1,
       "tensions": 1,
       "open_problems": 1,
-      "prompt_tokens": 8750,
-      "completion_tokens": 3870,
-      "total_tokens": 12620,
+      "prompt_tokens": 5632,
+      "completion_tokens": 1710,
+      "total_tokens": 7342,
       "ms": {
         "expand": 0,
         "retrieve": 0,
         "rerank": 1,
-        "extract": 6,
+        "extract": 27,
         "synthesize": 0
       },
-      "total_ms": 9
+      "total_ms": 38
     }
   ]
 }
