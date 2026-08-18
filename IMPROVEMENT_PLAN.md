@@ -4,8 +4,15 @@ Working backlog for making the project **more efficient, robust, optimized, and
 token-efficient**. Every row cites a real `file:line` so a fix can start without
 re-investigation.
 
-**Status:** nothing here is fixed yet. This is the audit, not the changelog.
-Move rows to `RELEASE.md` as they land.
+**Status:** the audit below is the original snapshot and is left unedited for
+history. See `RELEASE.md` v0.2.0 and v0.3.0 for what's actually landed —
+**15 of the original 33 findings are now closed**: P0-1, P0-2, P1-1, P1-2,
+P1-3, P1-4, P1-5, P1-6, P1-7, P2-1, P2-2, P2-3, P2-4, P2-5, P2-6, P3-1, P3-3,
+P3-5, P3-6, P4-1, P5-1, P5-2, P5-3, P5-4, P5-6, P5-7. P5-5 was evaluated and
+found not-yet-applicable (no cross-run synthesis feature exists yet to bound —
+see the Phase 1 note in `RELEASE.md`). Remaining open, by design choice this
+session (UI is now Gradio; CORS/CDN/deployment topology explicitly left
+as-is): P3-2, P3-4, P4-3, P4-4, P5-8.
 
 **How findings were sourced:**
 

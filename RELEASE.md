@@ -204,3 +204,61 @@ All defaults remain free-tier. Switching rerank/extract/expand to
 > Determinism note: the fixtures use `zlib.crc32` rather than `hash()`. Python
 > randomises string hashing per process, which made offline token counts drift
 > between runs and left the baseline undiffable.
+
+---
+
+# Remaining-Backlog Batch — v0.3.0
+
+Closes the rest of `IMPROVEMENT_PLAN.md`'s findings that were still worth
+doing, given two constraints from this session: the UI is now a separate
+Gradio (Hugging Face Space) front end calling this backend, so UI-side work
+(P3-2, P4-3, P4-4) and deployment-topology work depending on an undecided
+CORS/proxy setup (P3-4) were explicitly left as-is. Persistence dedup was
+resolved: one row per paper (`arxiv_id` primary key), a join table tags which
+runs surfaced which papers.
+
+## Closed
+
+| # | Area | What changed |
+|---|---|---|
+| P4-1, P3-5, P3-6 | Hygiene | `.github/workflows/ci.yml` (pytest, pip-audit, gitleaks); `requirements.txt` pinned to exact verified versions; `PATCH` dropped from CORS methods until a PATCH route existed |
+| P2-6 | Resilience | `LLM_FALLBACK_MODEL`: a 429 (`RateLimitExceeded`) retries once against a fallback instead of burning the OpenAI client's own backoff against a daily quota that can't recover mid-run — the likely real cause of the recorded 7/18-vs-16/18 extraction gap |
+| P1-3, P1-7 | Retrieval quality | Rerank batches candidates in groups of 15 (concurrent), reducing per-call prompt size and truncation risk; `SearchRequest.published_after` filters out papers older than a cutoff, since `SortCriterion.Relevance` alone let old papers outrank new SOTA |
+| P2-1, P5-1, P5-4, P5-3, P2-5 | Persistence | SQLite-backed reading map (`storage.py`): a paper's extraction is cached once and reused by every later run that retrieves it (proven end-to-end in `test_service.py`) — this is where the token savings actually land. 5 of 6 PRD API endpoints now implemented (`GET /api/runs`, `/{id}`, `/{id}/papers`, `/{id}/landscape`, `PATCH /api/papers/{id}`) |
+| P3-1, P5-2 | Latency (UX) | `POST /api/search` no longer blocks for the full 3–5 min run — returns `{run_id}` immediately; `GET /api/runs/{id}/stream` (SSE) streams the `ARCHITECTURE.md` state machine live. **Breaking change** to `POST /api/search`'s response shape |
+| P2-4 | Token efficiency | Embedding prefilter before rerank — **opt-in**, off by default. OpenRouter's `/embeddings` coverage is unverified against the configured model, so any failure falls back to unfiltered candidates automatically |
+| P5-7 | Extraction depth | Full-text PDF excerpt for the top `FULL_TEXT_TOP_N` papers by rerank score — **opt-in**, off by default (adds real per-paper latency; would otherwise make the offline eval harness hit arxiv.org for synthetic ids) |
+
+## Still open (deliberately, this session)
+
+- P3-2, P4-3, P4-4 — UI-side; dead work now that Gradio is the front end.
+- P3-4 — depends on whether the Gradio Space ends up calling this API directly
+  (needs CORS) or through a proxy; deployment topology explicitly not decided.
+- P5-5 — evaluated, not applicable: `synthesize_landscape` only ever ingests
+  the current run's `<=18` papers, already bounded. Nothing to cap until a
+  cross-run/whole-map synthesis feature exists.
+- P5-8 (Next.js) — lowest value now; UI is Gradio.
+
+## Two deviations from the original schema sketches
+
+Both documented in `storage.py`'s module docstring:
+
+1. `read_status` lives on `papers`, not `run_papers` — `PATCH
+   /api/papers/{arxiv_id}` has no `run_id` to resolve which row to update, so
+   read state has to be global to the paper.
+2. Embeddings live in their own table, not a column on `papers` — the
+   prefilter runs before extraction, before a candidate has ever earned a
+   `papers` row.
+
+## Tests Run
+
+- **129 unit tests, 129 passed** (up from 54), plus 1 opt-in live catalog
+  check. New modules: `test_storage.py`, `test_run_status.py`,
+  `test_runs_api.py`, `test_service.py`, `test_embed.py`, `test_fulltext.py`.
+- Every new feature has an explicit "falls back safely / off by default"
+  regression test — rate-limit fallback, all-batches-failing rerank,
+  cache-hit-skips-LLM, embed-prefilter-disabled, full-text-fetch-failure.
+- **Offline eval**, `python -m evals.run --offline`: baseline refreshed twice
+  (rerank batching changed the token shape; persistence caching reduced it via
+  genuine cross-topic reuse in the fixture data) and unchanged for both
+  opt-in features, since neither is exercised while disabled.
