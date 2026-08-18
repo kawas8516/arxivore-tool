@@ -43,7 +43,9 @@ _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _settings.cors_allow_origins.split(",")],
-    allow_methods=["GET", "POST", "PATCH"],
+    # PATCH isn't listed: no PATCH route exists yet. Add it back when
+    # PATCH /api/papers/{arxiv_id} (FR11) lands.
+    allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
 
