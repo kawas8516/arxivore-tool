@@ -8,6 +8,7 @@ from openai import OpenAI
 from app.config import get_settings
 from app.models import Paper, RerankItem, RerankOut
 from app.pipeline._json import LLMOutputError, call_json_with_fallback
+from app.pipeline.embed import prefilter_by_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,9 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
         return [], 0, 0, 0
 
     settings = get_settings()
+    # No-op unless EMBED_PREFILTER_ENABLED — see embed.py's module docstring.
+    candidates = prefilter_by_similarity(topic, candidates)
+
     # Fewer client-side retries: a fallback model now handles the "primary is
     # rate-limited" case, so there's no value in the SDK burning several
     # backoff cycles against the same wall first.

@@ -11,8 +11,16 @@ Deviation from the original schema sketch: read_status lives on `papers`, not
 `run_papers`. PATCH /api/papers/{arxiv_id} only has an arxiv_id, no run_id, so a
 per-run read_status would have no way to resolve which row to update — read
 state is inherently global to a paper, not to the run that surfaced it.
+
+Second deviation: embeddings live in their own table, not a column on `papers`.
+The embedding prefilter (pipeline/embed.py) runs before rerank — before
+extraction, before a paper has ever earned a `papers` row — so a column there
+would mean either inserting a half-populated row early or losing the cache for
+every candidate that gets filtered out before extraction. A standalone table
+keyed on arxiv_id has neither problem.
 """
 
+import array
 import json
 import logging
 import sqlite3
@@ -68,6 +76,13 @@ CREATE TABLE IF NOT EXISTS run_papers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_papers_arxiv_id ON run_papers(arxiv_id);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    arxiv_id TEXT PRIMARY KEY,
+    model TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 _VALID_READ_STATUSES = {"unread", "read", "to_read", "skipped"}
@@ -310,3 +325,33 @@ def list_runs() -> list[dict]:
             """
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_embedding(arxiv_id: str, model: str) -> list[float] | None:
+    """A cached embedding, or None on a miss. Keyed on (arxiv_id, model): a
+    changed LLM_EMBEDDING_MODEL is a cache miss, not a mismatch — old vectors
+    aren't comparable across embedding models."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT vector FROM embeddings WHERE arxiv_id = ? AND model = ?",
+            (arxiv_id, model),
+        ).fetchone()
+    if row is None:
+        return None
+    vector = array.array("f")
+    vector.frombytes(row["vector"])
+    return list(vector)
+
+
+def save_embedding(arxiv_id: str, model: str, vector: list[float]) -> None:
+    packed = array.array("f", vector).tobytes()
+    with _write_lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO embeddings (arxiv_id, model, vector, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(arxiv_id) DO UPDATE SET
+                model=excluded.model, vector=excluded.vector, created_at=excluded.created_at
+            """,
+            (arxiv_id, model, packed, _now()),
+        )

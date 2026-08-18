@@ -157,3 +157,41 @@ def test_update_read_status_rejects_invalid_value():
     storage.save_extraction(_paper("2401.0001"))
     with pytest.raises(ValueError):
         storage.update_read_status("2401.0001", "definitely-not-a-status")
+
+
+def test_embedding_cache_miss_returns_none():
+    assert storage.get_embedding("2401.0001", "some-model") is None
+
+
+def test_embedding_save_then_get_round_trips_with_float_precision():
+    vector = [0.1, -0.25, 3.5, 0.0, 1e-3]
+    storage.save_embedding("2401.0001", "some-model", vector)
+
+    cached = storage.get_embedding("2401.0001", "some-model")
+    assert cached is not None
+    for a, b in zip(vector, cached):
+        assert a == pytest.approx(b, abs=1e-6)  # array('f') is 32-bit; exact equality isn't guaranteed
+
+
+def test_embedding_is_a_cache_miss_for_a_different_model():
+    """Switching LLM_EMBEDDING_MODEL must not serve a vector from another
+    model — they aren't comparable."""
+    storage.save_embedding("2401.0001", "model-a", [1.0, 0.0])
+    assert storage.get_embedding("2401.0001", "model-b") is None
+
+
+def test_embedding_does_not_require_a_papers_row():
+    """Prefiltering runs before extraction — a candidate that never gets a
+    papers row must still be embeddable and cacheable."""
+    storage.save_embedding("never-extracted", "some-model", [1.0, 2.0])
+    assert storage.get_embedding("never-extracted", "some-model") == pytest.approx(
+        [1.0, 2.0]
+    )
+
+
+def test_embedding_upsert_overwrites_previous_vector():
+    storage.save_embedding("2401.0001", "some-model", [1.0, 0.0])
+    storage.save_embedding("2401.0001", "some-model", [0.0, 1.0])
+
+    cached = storage.get_embedding("2401.0001", "some-model")
+    assert cached == pytest.approx([0.0, 1.0])

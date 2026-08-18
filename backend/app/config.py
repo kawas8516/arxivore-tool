@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     # mid-run. Empty disables fallback (raises RateLimitExceeded as before).
     llm_fallback_model: str = ""
 
+    # Off by default: OpenRouter's /embeddings coverage is much narrower than
+    # its chat-completions catalog, and support for a given model is unverified
+    # until you confirm it against your own LLM_BASE_URL. Any failure (wrong
+    # endpoint, unsupported model, network error) falls back to sending every
+    # candidate straight to rerank unfiltered — enabling this can only ever cost
+    # you latency on a bad config, never recall.
+    embed_prefilter_enabled: bool = False
+    llm_embedding_model: str = "openai/text-embedding-3-small"
+    # Candidates kept after the prefilter, before the LLM rerank call sees them.
+    embed_prefilter_keep: int = 20
+
     max_candidates: int = 50
     max_retained_papers: int = 18
     max_concurrent_runs: int = 3
