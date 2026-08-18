@@ -7,6 +7,7 @@ arxiv==4.0.1
 openai==2.14.0
 pydantic==2.12.4
 pydantic-settings==2.12.0
+pypdf==6.6.2
 
 # dev / test / evals
 pytest==8.3.5

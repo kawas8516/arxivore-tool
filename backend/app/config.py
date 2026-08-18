@@ -39,6 +39,19 @@ class Settings(BaseSettings):
     # Candidates kept after the prefilter, before the LLM rerank call sees them.
     embed_prefilter_keep: int = 20
 
+    # Off by default: a PDF fetch+parse per paper adds real seconds of latency
+    # and a network dependency on arxiv.org, and would otherwise make the
+    # offline eval harness (evals/run.py --offline) attempt real HTTP calls for
+    # its synthetic paper ids. Abstracts rarely contain hard numbers, so this
+    # exists to give extraction's `results` field something to work with beyond
+    # vague abstract language, for the handful of papers the run cares most
+    # about.
+    full_text_enabled: bool = False
+    # Only the top N papers by rerank score get full-text treatment — fetching
+    # and parsing a PDF for every retained paper isn't worth the latency.
+    full_text_top_n: int = 5
+    full_text_max_chars: int = 6000
+
     max_candidates: int = 50
     max_retained_papers: int = 18
     max_concurrent_runs: int = 3

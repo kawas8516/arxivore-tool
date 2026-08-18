@@ -9,6 +9,7 @@ from app import storage
 from app.config import get_settings
 from app.models import ExtractionOut, Paper
 from app.pipeline._json import call_json_with_fallback
+from app.pipeline.fulltext import fetch_excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -29,24 +30,45 @@ Extract structured information from the paper below.
 <abstract>
 {abstract}
 </abstract>
-
+{excerpt_block}
 Return a JSON object with exactly these keys:
   "problem"      — the core problem or gap the paper addresses (1–2 sentences)
   "method"       — the approach or technique proposed (1–2 sentences)
   "results"      — key quantitative or qualitative findings (1–2 sentences)
   "contribution" — the main novel contribution claimed (1 sentence)
 
-Every value must be a non-empty string. Respond with ONLY the JSON object.\
+If a results-section excerpt is given above, prefer its concrete numbers over
+vague abstract language for the "results" field. Every value must be a
+non-empty string. Respond with ONLY the JSON object.\
+"""
+
+_EXCERPT_BLOCK_TMPL = """
+<results_section_excerpt>
+{excerpt}
+</results_section_excerpt>
 """
 
 
-def _extract_one(paper: Paper, client: OpenAI, model: str, fallback_model: str) -> tuple[int, int]:
+def _extract_one(
+    paper: Paper,
+    client: OpenAI,
+    model: str,
+    fallback_model: str,
+    full_text_max_chars: int = 0,
+) -> tuple[int, int]:
+    # Fetched here, inside the per-paper worker, so a slow PDF for one paper
+    # doesn't block the others — they're already running on separate threads.
+    excerpt = fetch_excerpt(paper.arxiv_id, full_text_max_chars) if full_text_max_chars else None
+    excerpt_block = _EXCERPT_BLOCK_TMPL.format(excerpt=excerpt) if excerpt else ""
     extraction, prompt_tokens, completion_tokens = call_json_with_fallback(
         client,
         model=model,
         fallback_model=fallback_model,
         system=_SYSTEM,
-        user=_USER_TMPL.format(title=paper.title, abstract=paper.abstract),
+        user=_USER_TMPL.format(
+            title=paper.title, abstract=paper.abstract, excerpt_block=excerpt_block
+        ),
+        # A results excerpt adds real input tokens but doesn't need more output.
         max_tokens=1024,
         schema=ExtractionOut,
     )
@@ -95,6 +117,15 @@ def extract_papers(
             except Exception:
                 logger.exception("on_progress callback raised — ignoring")
 
+    # papers is already rank-ordered (rerank sorts descending before slicing),
+    # so the first N ids here are genuinely the top N by relevance regardless
+    # of which ones turn out to be cache hits below.
+    full_text_ids: set[str] = (
+        {p.arxiv_id for p in papers[: settings.full_text_top_n]}
+        if settings.full_text_enabled
+        else set()
+    )
+
     to_fetch: list[Paper] = []
     cache_hits = 0
     for paper in papers:
@@ -126,6 +157,7 @@ def extract_papers(
                     client,
                     settings.llm_extract_model,
                     settings.llm_fallback_model,
+                    settings.full_text_max_chars if paper.arxiv_id in full_text_ids else 0,
                 ): paper
                 for paper in to_fetch
             }

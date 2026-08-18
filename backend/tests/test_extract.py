@@ -266,3 +266,118 @@ def test_extract_accumulates_token_usage(mock_openai_cls):
     assert errors == 0
     assert prompt_tokens == 200
     assert completion_tokens == 80
+
+
+@patch("app.pipeline.extract.fetch_excerpt")
+@patch("app.pipeline.extract.OpenAI")
+def test_full_text_disabled_by_default_never_fetches(mock_openai_cls, mock_fetch):
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
+    mock_openai_cls.return_value = mock_client
+
+    extract_papers([_make_paper("2401.0001")])
+
+    mock_fetch.assert_not_called()
+
+
+@patch("app.pipeline.extract.fetch_excerpt")
+@patch("app.pipeline.extract.OpenAI")
+def test_full_text_applies_only_to_top_n_by_rank(mock_openai_cls, mock_fetch, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
+    monkeypatch.setenv("FULL_TEXT_TOP_N", "2")
+    get_settings.cache_clear()
+
+    mock_fetch.return_value = "Results: 92% accuracy."
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
+    mock_openai_cls.return_value = mock_client
+
+    # papers is already rank-ordered — only the first 2 should get full text.
+    papers = [_make_paper(f"2401.{i:04d}") for i in range(4)]
+    extract_papers(papers)
+
+    get_settings.cache_clear()
+    fetched_ids = {call.args[0] for call in mock_fetch.call_args_list}
+    assert fetched_ids == {"2401.0000", "2401.0001"}
+
+
+@patch("app.pipeline.extract.fetch_excerpt")
+@patch("app.pipeline.extract.OpenAI")
+def test_full_text_excerpt_included_in_prompt_when_available(
+    mock_openai_cls, mock_fetch, monkeypatch
+):
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
+    monkeypatch.setenv("FULL_TEXT_TOP_N", "1")
+    get_settings.cache_clear()
+
+    mock_fetch.return_value = "We achieve 92.3% accuracy on the benchmark."
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
+    mock_openai_cls.return_value = mock_client
+
+    extract_papers([_make_paper("2401.0001")])
+
+    get_settings.cache_clear()
+    user_content = mock_client.chat.completions.create.call_args.kwargs["messages"][-1]["content"]
+    assert "92.3% accuracy" in user_content
+    assert "<results_section_excerpt>" in user_content
+
+
+@patch("app.pipeline.extract.fetch_excerpt")
+@patch("app.pipeline.extract.OpenAI")
+def test_full_text_fetch_failure_still_extracts_from_abstract(
+    mock_openai_cls, mock_fetch, monkeypatch
+):
+    """fetch_excerpt returning None (its own failure contract) must not break
+    extraction — it just falls back to abstract-only, silently."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
+    get_settings.cache_clear()
+
+    mock_fetch.return_value = None
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
+    mock_openai_cls.return_value = mock_client
+
+    result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
+
+    get_settings.cache_clear()
+    assert errors == 0
+    assert result[0].extract_status == "done"
+    user_content = mock_client.chat.completions.create.call_args.kwargs["messages"][-1]["content"]
+    assert "<results_section_excerpt>" not in user_content
+
+
+@patch("app.pipeline.extract.fetch_excerpt")
+@patch("app.pipeline.extract.OpenAI")
+def test_full_text_skips_cache_hits(mock_openai_cls, mock_fetch, monkeypatch):
+    """A cached paper never re-enters the LLM path at all, so it must never
+    trigger a PDF fetch either — even if it's within the top N by rank."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
+    get_settings.cache_clear()
+
+    cached = _make_paper("2401.0001")
+    cached.problem = "Cached."
+    cached.method = "Cached."
+    cached.results = "Cached."
+    cached.contribution = "Cached."
+    cached.extract_status = "done"
+    monkeypatch.setattr(storage, "get_cached_extraction", lambda arxiv_id: cached)
+
+    mock_openai_cls.return_value = MagicMock()
+
+    extract_papers([_make_paper("2401.0001")])
+
+    get_settings.cache_clear()
+    mock_fetch.assert_not_called()
