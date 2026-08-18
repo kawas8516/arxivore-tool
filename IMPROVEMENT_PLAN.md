@@ -6,16 +6,19 @@ re-investigation.
 
 **Status:** the audit below is the original snapshot and is left unedited for
 history. See `RELEASE.md` v0.2.0 through v0.4.0 for what's actually landed —
-**19 of the original 33 findings are now closed**: P0-1, P0-2, P1-1, P1-2,
+**18 of the original 33 findings are now closed**: P0-1, P0-2, P1-1, P1-2,
 P1-3, P1-4, P1-5, P1-6, P1-7, P2-1, P2-2, P2-3, P2-4, P2-5, P2-6, P3-1, P3-2,
-P3-3, P3-5, P3-6, P4-1, P4-2, P4-3, P4-4, P5-1, P5-2, P5-3, P5-4, P5-6, P5-7.
+P3-3, P3-5, P3-6, P4-2, P4-3, P4-4, P5-1, P5-2, P5-3, P5-4, P5-6, P5-7.
 (P4-2 — spend-ceiling enforcement — was actually closed in the very first
 batch, before the session that produced this plan's other tracking; it was
-never marked here until this pass caught the gap.) P5-5 was evaluated and
-found not-yet-applicable (no cross-run synthesis feature exists yet to bound —
-see the Phase 1 note in `RELEASE.md`). Remaining open, by explicit decision
-this session (deployment topology and UI framework choice are still not
-decisions to make in-repo): **P3-4** (trusted X-Forwarded-For — depends on
+never marked here until this pass caught the gap.) **P4-1 (CI) was
+implemented then explicitly reverted** — this repo's `main` is never deployed,
+so an automated CI/CD run has no job to do here; removed rather than left as
+dead infrastructure. P5-5 was evaluated and found not-yet-applicable (no
+cross-run synthesis feature exists yet to bound — see the Phase 1 note in
+`RELEASE.md`). Remaining open, by explicit decision this session (deployment
+topology and UI framework choice are still not decisions to make in-repo):
+**P3-4** (trusted X-Forwarded-For — depends on
 whether the Gradio Space ends up calling this API directly or through a
 proxy, undecided) and **P5-8** (Next.js migration — dead work now that
 Gradio is the real front end).
@@ -141,7 +144,7 @@ Live controls are in good shape. Gaps are process-level.
 
 | # | Finding | File:line | Status | Fix |
 |---|---------|-----------|--------|-----|
-| P4-1 | **No CI secret scanning or dependency audit** (`gitleaks`, `pip-audit`). No `.github/` directory exists. | `RELEASE.md:93` | Open, accepted for v1 | GitHub Actions: `gitleaks` + `pip-audit` + `pytest` on push. Public repo — worth the 20 minutes. *(Found by DeepWiki; code review missed it.)* |
+| P4-1 | **No CI secret scanning or dependency audit** (`gitleaks`, `pip-audit`). No `.github/` directory exists. | `RELEASE.md:93` | **Reverted** — implemented (`.github/workflows/ci.yml`), then removed: `main` is never deployed, so there's no job for an automated run to do here. Run `pytest` / `pip-audit` locally instead. | ~~GitHub Actions: `gitleaks` + `pip-audit` + `pytest` on push.~~ *(Found by DeepWiki; code review missed it.)* |
 | P4-2 | **Spend ceiling unenforced** — see P2-3. | `config.py:22` | Open lapse #3 (`RELEASE.md:71`) | Blocked on P2-3. Must land before any multi-user exposure. |
 | P4-3 | **CSP permits `unsafe-inline` + `unsafe-eval` + two external CDNs.** | `main.py:17-26`, `:19-21` | Accepted (Alpine.js requires eval) | Vendor Alpine + a built Tailwind stylesheet locally → drop `unsafe-eval` and both CDN origins from `script-src`/`style-src`. Also retires the Tailwind **Play** CDN (`index.html:8`), which is explicitly not for production use, and closes P4-4. |
 | P4-4 | **CDN assets unpinned and unverified.** Tailwind Play CDN at `index.html:8`; Alpine at `index.html:9` using a **floating tag** — `alpinejs@3.x.x` — with no `integrity` on either. | `index.html:8-9` | Open | `3.x.x` resolves to *whatever 3.x is latest at page load*: arbitrary third-party JS executes in the app origin, and a compromised or broken release ships to users with no repo change. Pin an exact version + add `integrity`/`crossorigin`, or vendor locally per P4-3 (preferred — kills P4-3 and P4-4 together). |
