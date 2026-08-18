@@ -1,0 +1,21 @@
+# Fixed topic set for regression runs. Order is stable: `--topics N` always takes
+# the first N, so a small run is comparable to a previous small run.
+#
+# Chosen to spread across arXiv categories (cs.CL, cs.LG, cs.CV, cs.RO, stat.ML)
+# and across phrasing styles — bare jargon, multi-word concepts, and method names.
+topics:
+  - retrieval-augmented generation
+  - diffusion policy learning
+  - state space models for language
+  - test-time compute scaling
+  - mixture of experts routing
+  - direct preference optimization
+  - mechanistic interpretability of transformers
+  - vision language model grounding
+  - speculative decoding for inference
+  - continual learning without forgetting
+  - graph neural network expressivity
+  - differentially private training
+  - reward model overoptimization
+  - long context attention efficiency
+  - sim-to-real transfer in robotics

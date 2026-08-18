@@ -1,7 +1,9 @@
 import json
+import pytest
 from unittest.mock import MagicMock, patch
 
 from app.models import Author, Paper
+from app.pipeline._json import LLMOutputError
 from app.pipeline.synthesize import synthesize_landscape
 
 
@@ -66,7 +68,7 @@ def test_synthesize_parses_landscape(mock_openai_cls):
     mock_openai_cls.return_value = mock_client
 
     papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
-    landscape, elapsed_ms = synthesize_landscape("retrieval", papers)
+    landscape, elapsed_ms, _, _ = synthesize_landscape("retrieval", papers)
 
     assert elapsed_ms >= 0
     assert len(landscape.clusters) == 2
@@ -100,6 +102,49 @@ def test_synthesize_only_sends_extracted_papers(mock_openai_cls):
 
 
 @patch("app.pipeline.synthesize.OpenAI")
+def test_synthesize_rejects_empty_landscape(mock_openai_cls):
+    """`{}` used to validate as a successful-but-blank landscape."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response({})
+    mock_openai_cls.return_value = mock_client
+
+    with pytest.raises(LLMOutputError):
+        synthesize_landscape("retrieval", [_make_paper("2401.0001")])
+
+
+@patch("app.pipeline.synthesize.OpenAI")
+def test_synthesize_prunes_hallucinated_ids_and_relationships(mock_openai_cls):
+    hallucinated = {
+        "clusters": [
+            {
+                "name": "Real Cluster",
+                "summary": "Grounded in the given papers.",
+                # 9999.9999 was never given to the model
+                "arxiv_ids": ["2401.0001", "9999.9999"],
+            }
+        ],
+        "relationships": [
+            {
+                "from_cluster": "Real Cluster",
+                "to_cluster": "Invented Cluster",  # not in clusters
+                "kind": "builds-on",
+                "description": "Dangling endpoint.",
+            }
+        ],
+        "tensions": [],
+        "open_problems": [],
+    }
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(hallucinated)
+    mock_openai_cls.return_value = mock_client
+
+    landscape, _, _, _ = synthesize_landscape("retrieval", [_make_paper("2401.0001")])
+
+    assert landscape.clusters[0].arxiv_ids == ["2401.0001"]
+    assert landscape.relationships == []
+
+
+@patch("app.pipeline.synthesize.OpenAI")
 def test_synthesize_handles_markdown_fenced_json(mock_openai_cls):
     mock_client = MagicMock()
     fenced = MagicMock()
@@ -111,6 +156,9 @@ def test_synthesize_handles_markdown_fenced_json(mock_openai_cls):
     mock_client.chat.completions.create.return_value = response
     mock_openai_cls.return_value = mock_client
 
-    papers = [_make_paper("2401.0001")]
-    landscape, _ = synthesize_landscape("retrieval", papers)
+    # All three papers must be present: _LANDSCAPE references all three ids, and
+    # cross-reference pruning would otherwise strip the missing ones and empty a
+    # cluster, making this assertion about fence handling fail for the wrong reason.
+    papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
+    landscape, _, _, _ = synthesize_landscape("retrieval", papers)
     assert len(landscape.clusters) == 2
