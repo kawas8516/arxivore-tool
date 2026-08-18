@@ -13,7 +13,7 @@ from openai import OpenAI
 
 from app.config import get_settings
 from app.models import ExpandOut
-from app.pipeline._json import call_json
+from app.pipeline._json import call_json_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +61,12 @@ def expand_query(topic: str) -> tuple[list[str], int, int, int]:
 
     try:
         client = OpenAI(
-            api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=3
+            api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=1
         )
-        expanded, prompt_tokens, completion_tokens = call_json(
+        expanded, prompt_tokens, completion_tokens = call_json_with_fallback(
             client,
             model=settings.llm_expand_model,
+            fallback_model=settings.llm_fallback_model,
             system=_SYSTEM,
             user=_USER_TMPL.format(topic=topic, n=settings.expand_queries),
             max_tokens=1024,

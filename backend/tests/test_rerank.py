@@ -1,10 +1,18 @@
 import json
+import httpx
+import openai
 import pytest
 from unittest.mock import MagicMock, patch
 
 from app.models import Author, Paper
 from app.pipeline._json import LLMOutputError
 from app.pipeline.rerank import rerank_candidates
+
+
+def _rate_limit_error() -> openai.RateLimitError:
+    request = httpx.Request("POST", "https://example.com")
+    response = httpx.Response(429, request=request)
+    return openai.RateLimitError("rate limited", response=response, body=None)
 
 
 def _make_paper(arxiv_id: str, score: float | None = None) -> Paper:
@@ -109,6 +117,30 @@ def test_rerank_tolerates_unscored_candidate(mock_openai_cls):
     assert ranked[0].arxiv_id == "2401.0001"
     assert ranked[-1].arxiv_id == "2401.0002"
     assert ranked[-1].relevance_score is None
+
+
+@patch("app.pipeline.rerank.OpenAI")
+def test_rerank_falls_back_to_secondary_model_on_rate_limit(mock_openai_cls, monkeypatch):
+    import os
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_API_KEY", os.environ.get("LLM_API_KEY", "test-key"))
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "backup-model")
+    get_settings.cache_clear()
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = [
+        _rate_limit_error(),
+        _fake_llm_response([{"arxiv_id": "2401.0001", "score": 0.5, "rationale": "ok"}]),
+    ]
+    mock_openai_cls.return_value = mock_client
+
+    ranked, _, _, _ = rerank_candidates("test topic", [_make_paper("2401.0001")])
+
+    get_settings.cache_clear()
+    assert ranked[0].relevance_score == 0.5
+    calls = mock_client.chat.completions.create.call_args_list
+    assert calls[1].kwargs["model"] == "backup-model"
 
 
 @patch("app.pipeline.rerank.OpenAI")

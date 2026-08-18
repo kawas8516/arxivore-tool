@@ -1,9 +1,17 @@
 import json
+import httpx
+import openai
 from unittest.mock import MagicMock, patch
 
 from app.models import Author, Paper
 from app.pipeline.extract import extract_papers
 from app.pipeline._json import strip_fences
+
+
+def _rate_limit_error() -> openai.RateLimitError:
+    request = httpx.Request("POST", "https://example.com")
+    response = httpx.Response(429, request=request)
+    return openai.RateLimitError("rate limited", response=response, body=None)
 
 
 def _make_paper(arxiv_id: str) -> Paper:
@@ -118,6 +126,33 @@ def test_extract_rejects_empty_string_fields(mock_openai_cls):
 
     assert errors == 1
     assert result[0].extract_status == "error"
+
+
+@patch("app.pipeline.extract.OpenAI")
+def test_extract_falls_back_to_secondary_model_on_rate_limit(mock_openai_cls, monkeypatch):
+    """A 429 from the primary model must not immediately fail the paper."""
+    import os
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_API_KEY", os.environ.get("LLM_API_KEY", "test-key"))
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "backup-model")
+    get_settings.cache_clear()
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = [
+        _rate_limit_error(),
+        _fake_response(_EXTRACTION),
+    ]
+    mock_openai_cls.return_value = mock_client
+
+    result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
+
+    get_settings.cache_clear()
+    assert errors == 0
+    assert result[0].extract_status == "done"
+    calls = mock_client.chat.completions.create.call_args_list
+    assert calls[0].kwargs["model"] != calls[1].kwargs["model"]
+    assert calls[1].kwargs["model"] == "backup-model"
 
 
 @patch("app.pipeline.extract.OpenAI")

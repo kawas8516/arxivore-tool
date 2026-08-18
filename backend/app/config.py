@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     llm_extract_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
     # Query expansion is a cheap single call; reuse the rerank-tier model.
     llm_expand_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+    # On a 429 from the primary model, retry once against this model instead of
+    # exhausting client-side retries against a daily quota that won't recover
+    # mid-run. Empty disables fallback (raises RateLimitExceeded as before).
+    llm_fallback_model: str = ""
 
     max_candidates: int = 50
     max_retained_papers: int = 18

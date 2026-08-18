@@ -6,7 +6,7 @@ from openai import OpenAI
 
 from app.config import get_settings
 from app.models import ExtractionOut, Paper
-from app.pipeline._json import call_json
+from app.pipeline._json import call_json_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +38,11 @@ Every value must be a non-empty string. Respond with ONLY the JSON object.\
 """
 
 
-def _extract_one(paper: Paper, client: OpenAI, model: str) -> tuple[int, int]:
-    extraction, prompt_tokens, completion_tokens = call_json(
+def _extract_one(paper: Paper, client: OpenAI, model: str, fallback_model: str) -> tuple[int, int]:
+    extraction, prompt_tokens, completion_tokens = call_json_with_fallback(
         client,
         model=model,
+        fallback_model=fallback_model,
         system=_SYSTEM,
         user=_USER_TMPL.format(title=paper.title, abstract=paper.abstract),
         max_tokens=1024,
@@ -65,7 +66,10 @@ def extract_papers(papers: list[Paper]) -> tuple[list[Paper], int, int, int, int
     claiming success.
     """
     settings = get_settings()
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=5)
+    # Fewer client-side retries: a fallback model now handles the "primary is
+    # rate-limited" case, so there's no value in the SDK burning several
+    # backoff cycles against the same wall first.
+    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=1)
 
     start = time.monotonic()
     error_count = 0
@@ -74,7 +78,9 @@ def extract_papers(papers: list[Paper]) -> tuple[list[Paper], int, int, int, int
 
     with ThreadPoolExecutor(max_workers=settings.extract_concurrency) as executor:
         futures = {
-            executor.submit(_extract_one, paper, client, settings.llm_extract_model): paper
+            executor.submit(
+                _extract_one, paper, client, settings.llm_extract_model, settings.llm_fallback_model
+            ): paper
             for paper in papers
         }
         for future in as_completed(futures):

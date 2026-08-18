@@ -6,7 +6,7 @@ from openai import OpenAI
 
 from app.config import get_settings
 from app.models import Paper, RerankOut
-from app.pipeline._json import call_json
+from app.pipeline._json import call_json_with_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,10 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
     Returns (ranked, elapsed_ms, prompt_tokens, completion_tokens).
     """
     settings = get_settings()
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=5)
+    # Fewer client-side retries: a fallback model now handles the "primary is
+    # rate-limited" case, so there's no value in the SDK burning several
+    # backoff cycles against the same wall first.
+    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=1)
 
     # Pass only what the LLM needs — never more surface area than necessary
     papers_payload = [
@@ -53,9 +56,10 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
     ]
 
     start = time.monotonic()
-    scores, prompt_tokens, completion_tokens = call_json(
+    scores, prompt_tokens, completion_tokens = call_json_with_fallback(
         client,
         model=settings.llm_rerank_model,
+        fallback_model=settings.llm_fallback_model,
         system=_SYSTEM,
         user=_USER_TMPL.format(
             topic=topic,
