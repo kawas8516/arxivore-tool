@@ -1,3 +1,16 @@
+---
+title: Arxivore
+emoji: 🔬
+colorFrom: indigo
+colorTo: purple
+sdk: gradio
+sdk_version: 5.9.1
+python_version: "3.11"
+app_file: app.py
+pinned: true
+license: mit
+---
+
 # Arxivore
 
 Map an entire ML research field from a single plain-English search.
@@ -6,6 +19,22 @@ Enter a topic — the agent pulls papers from arXiv, reranks them by semantic
 relevance, extracts structured insights per paper, and synthesizes a cross-paper
 landscape of clusters, relationships, tensions, and open problems. The reading
 map grows over time as you run more searches.
+
+## Live demo
+
+This branch (`hf-spaces-prototype`) doubles as the source for the Gradio demo at
+**[huggingface.co/spaces/kawas8516/arxivore](https://huggingface.co/spaces/kawas8516/arxivore)**.
+The Space runs on the free CPU tier with no API key required:
+
+1. **Retrieve** — pull candidate papers from arXiv
+2. **Rerank** — `BAAI/bge-reranker-v2-m3` cross-encoder, on CPU, no API cost
+3. **Extract** — `microsoft/Phi-4-mini-instruct` via the HF Inference API
+4. **Synthesize** — the same model cross-reads every extraction into a landscape
+
+The Space files live at the **repo root** (`app.py`, `llm.py`, `models.py`,
+`pipeline/`, `requirements.txt`) so this branch mirrors the Space repo exactly —
+the YAML card above is what HF reads. The FastAPI backend in `backend/` is the
+fuller OpenRouter-backed implementation and is not part of the Space build.
 
 ## Features
 
@@ -84,19 +113,36 @@ map grows over time as you run more searches.
 ### Prerequisites
 
 - Python ≥ 3.11
-- Node.js ≥ 20
-- An Anthropic API key
+- An OpenRouter API key (backend only — the Gradio Space needs none)
+
+There are **two** dependency sets, and picking the wrong one is the easiest
+mistake to make here:
+
+| File | For |
+|------|-----|
+| `requirements.txt` (root) | the Gradio Space — gradio, sentence-transformers, huggingface_hub |
+| `backend/requirements.txt` | the FastAPI backend — fastapi, openai, arxiv |
 
 ### 1. Clone and configure
 
 ```bash
 git clone <repo-url>
-cd patch-search
+cd arxivore-tool
 cp .env.example .env
 # Open .env and set LLM_API_KEY=sk-or-... (get one free at openrouter.ai)
 ```
 
-### 2. Run (one server, no Node)
+### 2a. Run the Gradio Space locally
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+First launch is slow: `pipeline/rerank.py` loads the
+`BAAI/bge-reranker-v2-m3` cross-encoder (~1.1 GB) at import.
+
+### 2b. Run the FastAPI backend (one server, no Node)
 
 ```bash
 cd backend
@@ -131,6 +177,13 @@ Examples:
 ## Project layout
 
 ```
+app.py              Gradio entry point for the HF Space (this is `app_file`)
+llm.py              HF Inference API wrapper (Phi-4-mini-instruct)
+models.py           Pydantic models used by the Space
+pipeline/           Space's four stages — retrieve · rerank · extract · synthesize
+requirements.txt    Space dependencies (gradio, sentence-transformers, …)
+README.md           This file — its YAML frontmatter is the HF Space card
+
 backend/
   app/
     main.py         FastAPI app — mounts /api and serves the static UI
@@ -141,7 +194,10 @@ backend/
     pipeline/       retrieve · rerank · extract · synthesize stages
     static/         index.html — single-page UI (Alpine.js + Tailwind, no Node)
   tests/            Unit tests for every pipeline stage
+  requirements.txt  Backend dependencies (FastAPI, openai, …) — not the root one
 .claude/agents/     Custom subagent definitions (security-reviewer stub)
+scripts/git-hooks/  Pre-commit secret guard (activate via core.hooksPath)
+HF_SPACES_PROTOTYPE.md  Space design notes — model choices, layout, deploy steps
 PRD.md              Product requirements — what & why
 ARCHITECTURE.md     State machine, user journey, API surface, persistence model
 FRONTEND_GUIDELINES.md  Design system, component conventions

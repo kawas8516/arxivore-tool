@@ -57,21 +57,40 @@ Extraction is done by prompting Phi-4-mini-instruct with strict JSON-only instru
 
 ## 3. Architecture for the Spaces prototype
 
+Repo root (this branch) — HF Spaces expects a flat layout with `app.py` at root,
+so these files sit at the root rather than under a subdirectory:
+
 ```
-huggingface_hub/
-  app.py                  ← Gradio app entry point (replaces main.py + Next.js)
-  pipeline/
-    retrieve.py           ← unchanged from backend/app/pipeline/retrieve.py
-    rerank.py             ← swapped: BAAI/bge-reranker-v2-m3 via sentence-transformers
-    extract.py            ← unchanged, but calls HF Inference API instead of OpenRouter
-    synthesize.py         ← unchanged, but calls HF Inference API instead of OpenRouter
-  llm.py                  ← thin wrapper around huggingface_hub.InferenceClient
-  models.py               ← unchanged Pydantic models
-  requirements.txt        ← gradio, arxiv, sentence-transformers, huggingface_hub, pydantic
-  README.md               ← HF Spaces card (title, sdk: gradio, python_version: 3.11)
+app.py                  ← Gradio app entry point (replaces main.py + Next.js)
+pipeline/
+  retrieve.py           ← unchanged from backend/app/pipeline/retrieve.py
+  rerank.py             ← swapped: BAAI/bge-reranker-v2-m3 via sentence-transformers
+  extract.py            ← unchanged, but calls HF Inference API instead of OpenRouter
+  synthesize.py         ← unchanged, but calls HF Inference API instead of OpenRouter
+llm.py                  ← thin wrapper around huggingface_hub.InferenceClient
+models.py               ← unchanged Pydantic models
+requirements.txt        ← gradio, arxiv, sentence-transformers, huggingface_hub, pydantic
+README.md               ← HF Spaces card in YAML frontmatter, project README below
 ```
 
-No `backend/` nesting — HF Spaces expects a flat layout with `app.py` at root.
+`backend/` and the design docs stay in the repo alongside these. HF only reads
+`README.md`'s frontmatter, `app_file`, and `requirements.txt`, and ignores
+everything the card doesn't reference — so the FastAPI backend is never part of
+the Space build.
+
+**Keeping the mirror honest.** The Space is its own git repo and is updated by
+hand, so the nine code files above must stay byte-identical to it. Verify with:
+
+```bash
+git cat-file -s $(git rev-parse HEAD:app.py)    # 6171
+git cat-file -s $(git rev-parse HEAD:llm.py)    # 1787
+# models.py 1268 · requirements.txt 151
+# pipeline/{__init__.py 0, extract.py 3393, rerank.py 982,
+#           retrieve.py 970, synthesize.py 2819}
+```
+
+`README.md` is the one deliberate divergence: the Space carries the card alone,
+this branch carries the card plus the full project README beneath it.
 
 ---
 
@@ -147,7 +166,8 @@ emoji: 🔬
 colorFrom: indigo
 colorTo: purple
 sdk: gradio
-sdk_version: 4.44.0
+sdk_version: 5.9.1
+python_version: "3.11"
 app_file: app.py
 pinned: true
 license: mit
@@ -155,13 +175,18 @@ license: mit
 ```
 
 HF Spaces reads this frontmatter to know it's a Gradio app and which file to run.
+It sits at the top of the repo-root `README.md`, with the project README below it.
+
+`sdk_version` moved 4.44.0 → 5.9.1 during build fixes: Gradio 4.x pulls `audioop`,
+which Python 3.13 removed. Pinning `python_version: "3.11"` and Gradio 5.x settles
+it from both directions.
 
 ---
 
 ## 8. `requirements.txt`
 
 ```
-gradio>=4.44.0
+gradio>=5.0.0
 arxiv>=2.1.0
 sentence-transformers>=3.0.0
 huggingface_hub>=0.23.0
@@ -185,8 +210,18 @@ No FastAPI, no uvicorn, no npm, no Next.js.
 - [x] **Step 6** — Adapt `synthesize.py` the same way
 - [x] **Step 7** — Wire full pipeline into `app.py` generator with live status updates
 - [x] **Step 8** — Write the HF Spaces `README.md` card
-- [ ] **Step 9** — Push branch; create Space at `huggingface.co/spaces/<username>/arxivore`; link repo
-- [ ] **Step 10** — Validate the live Space: run one query, confirm all three tabs populate
+- [x] **Step 9** — Space live at [`huggingface.co/spaces/kawas8516/arxivore`](https://huggingface.co/spaces/kawas8516/arxivore)
+- [x] **Step 10** — Validate the live Space: run one query, confirm all three tabs populate
+- [x] **Step 11** — Promote the Space files from `hf_space/` to the repo root so this
+      branch mirrors the Space repo and the two can be diffed without the HF API
+
+### Updating the Space
+
+The Space is a **separate git repo** and is **not** linked to GitHub — pushing
+this branch does not deploy. To ship a change, copy the nine root files into a
+clone of the Space repo and push there. The card is the one file that differs:
+the Space carries frontmatter only, this branch carries frontmatter plus the
+project README.
 
 ---
 
