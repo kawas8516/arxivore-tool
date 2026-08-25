@@ -1,7 +1,7 @@
 """Arxivore — HF Spaces entry point.
 
 Three-tab Gradio interface over the four-stage pipeline:
-  retrieve → rerank (bge-reranker-v2-m3) → extract → synthesize (Phi-4-mini-instruct)
+  retrieve → rerank (bge-reranker-v2-m3) → extract → synthesize (gemma-3-12b-it)
 """
 
 import logging
@@ -63,7 +63,7 @@ def run_pipeline(query: str, num_papers: int):
         return
 
     yield (
-        f"Ranked to top {len(top_papers)} papers ({rerank_ms} ms). Extracting with Phi-4-mini-instruct...",
+        f"Ranked to top {len(top_papers)} papers ({rerank_ms} ms). Extracting with gemma-3-12b-it...",
         None, "", {},
     )
 

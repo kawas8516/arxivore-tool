@@ -1,4 +1,10 @@
-"""LLM wrapper for HF Spaces — uses HF Inference API with Phi-4-mini-instruct."""
+"""LLM wrapper for HF Spaces — uses the HF Inference API.
+
+microsoft/Phi-4-mini-instruct was the original choice but is not served by any
+inference provider ("model_not_supported"), which failed extract and synthesize
+at runtime while the Space still built and ran green. gemma-3-12b-it is served,
+returns valid JSON, and is small enough to be cheap on free-tier credits.
+"""
 
 import os
 import time
@@ -9,7 +15,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "microsoft/Phi-4-mini-instruct"
+_MODEL = "google/gemma-3-12b-it"
 _client: InferenceClient | None = None
 
 
@@ -42,7 +48,7 @@ def complete(
     max_tokens: int = 1024,
     pool: list[str] | None = None,  # ignored — kept for API compat with backend
 ) -> str:
-    """Run a chat completion against Phi-4-mini-instruct via HF Inference API."""
+    """Run a chat completion against the configured model via the HF Inference API."""
     client = _get_client()
     start = time.monotonic()
 

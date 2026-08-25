@@ -28,7 +28,7 @@ The Space runs on the free CPU tier with no API key required:
 
 1. **Retrieve** — pull candidate papers from arXiv
 2. **Rerank** — `BAAI/bge-reranker-v2-m3` cross-encoder, on CPU, no API cost
-3. **Extract** — `microsoft/Phi-4-mini-instruct` via the HF Inference API
+3. **Extract** — `google/gemma-3-12b-it` via the HF Inference API
 4. **Synthesize** — the same model cross-reads every extraction into a landscape
 
 The Space files live at the **repo root** (`app.py`, `llm.py`, `models.py`,
@@ -180,7 +180,7 @@ Examples:
 
 ```
 app.py              Gradio entry point for the HF Space (this is `app_file`)
-llm.py              HF Inference API wrapper (Phi-4-mini-instruct)
+llm.py              HF Inference API wrapper (gemma-3-12b-it)
 models.py           Pydantic models used by the Space
 pipeline/           Space's four stages — retrieve · rerank · extract · synthesize
 requirements.txt    Space dependencies (gradio, sentence-transformers, …)

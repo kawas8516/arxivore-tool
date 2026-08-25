@@ -23,20 +23,39 @@ Everything else stays the same: the four-stage pipeline (`retrieve → rerank �
 
 ### Synthesis + Extraction (main LLM)
 
-**Chosen: `microsoft/Phi-4-mini-instruct`**
+**Originally chosen: `microsoft/Phi-4-mini-instruct` — superseded, see below.**
+
+> **It was never served.** The HF Inference API answers
+> `microsoft/Phi-4-mini-instruct` with `model_not_supported` — no provider hosts
+> it, and the `-mini-instruct` variant does not exist (plain `microsoft/phi-4`
+> does). The Space still built and ran green, so this surfaced only as empty
+> Papers and Landscape tabs at runtime.
+>
+> **Now: `google/gemma-3-12b-it`** — served, returns valid JSON, and small
+> enough to be cheap on free-tier inference credits. It fences its JSON, which
+> `strip_fences()` already handles. `Qwen/Qwen2.5-72B-Instruct` also tested
+> clean if extraction quality ever needs the upgrade.
 
 | Property | Value |
 |---|---|
-| HF repo | `microsoft/Phi-4-mini-instruct` |
-| Parameters | 3.8B |
-| License | MIT |
-| Downloads | 765K |
-| HF Inference API | Yes — free tier, no gating |
-| Link | https://hf.co/microsoft/Phi-4-mini-instruct |
+| HF repo | `google/gemma-3-12b-it` |
+| Parameters | 12B |
+| Served by | featherless-ai, deepinfra (via the HF router) |
+| Link | https://hf.co/google/gemma-3-12b-it |
 
-**Why Phi-4-mini-instruct:** Fastest cold start on Spaces CPU (3.8B vs 7B), MIT license, strong structured JSON output for extraction, and Microsoft's newest Phi-4 generation outperforms older 7B models on instruction benchmarks despite being smaller. Ideal for a live recruiter demo where latency matters.
+**Why gemma-3-12b-it:** it is actually served — the property the original pick
+turned out to lack. Inference runs provider-side, so Space CPU and cold start no
+longer bound the model choice; what matters instead is credits per run, which a
+12B keeps low. Verified end to end: 2/2 papers extracted in 4.2 s, synthesis
+returned 2 clusters, 2 relationships, 1 tension, 3 open problems.
 
-Extraction is done by prompting Phi-4-mini-instruct with strict JSON-only instructions — no separate model needed.
+**Tested alternatives:** `Qwen/Qwen2.5-72B-Instruct` emitted bare JSON and is the
+quality upgrade if extraction ever needs it, at more credits per run.
+`microsoft/phi-4` is served but ignored the JSON-only instruction.
+`Qwen/Qwen3-14B` returned empty content (a thinking model).
+
+Extraction is done by prompting the model with strict JSON-only instructions —
+no separate model needed. Output arrives fenced; `strip_fences()` handles it.
 
 ### Rerank (dedicated cross-encoder — no LLM cost)
 
@@ -82,8 +101,8 @@ the Space build.
 hand, so the nine code files above must stay byte-identical to it. Verify with:
 
 ```bash
-git cat-file -s $(git rev-parse HEAD:app.py)    # 6171
-git cat-file -s $(git rev-parse HEAD:llm.py)    # 1787
+git cat-file -s $(git rev-parse HEAD:app.py)    # 6161
+git cat-file -s $(git rev-parse HEAD:llm.py)    # 2078
 # models.py 1268 · requirements.txt 151
 # pipeline/{__init__.py 0, extract.py 3393, rerank.py 982,
 #           retrieve.py 970, synthesize.py 2819}
@@ -121,7 +140,7 @@ The UI streams progress via a Python generator yielding status strings — no SS
 ```python
 from huggingface_hub import InferenceClient
 
-_MODEL = "microsoft/Phi-4-mini-instruct"
+_MODEL = "google/gemma-3-12b-it"
 _client = InferenceClient()  # uses HF_TOKEN env var if set, else public API
 
 def complete(prompt: str, model: str = _MODEL) -> str:
@@ -204,7 +223,7 @@ No FastAPI, no uvicorn, no npm, no Next.js.
 
 - [x] **Step 1** — Scaffold `app.py` with the three-tab Gradio skeleton
 - [x] **Step 2** — Copy and adapt `models.py`, `retrieve.py`
-- [x] **Step 3** — Write new `llm.py` wrapping `InferenceClient` with `Phi-4-mini-instruct`
+- [x] **Step 3** — Write new `llm.py` wrapping `InferenceClient` (now `gemma-3-12b-it`)
 - [x] **Step 4** — Write new `rerank.py` using `BAAI/bge-reranker-v2-m3`
 - [x] **Step 5** — Adapt `extract.py` to call the new `llm.py`
 - [x] **Step 6** — Adapt `synthesize.py` the same way
@@ -232,7 +251,7 @@ project README.
 3. Watch the pipeline progress in real time — retrieve → rerank → extract → synthesize.
 4. Show the ranked paper table with structured extractions.
 5. Show the synthesized landscape: clusters, open problems, tensions.
-6. Point to the code: flat Python, one `app.py`, four pipeline stages, `BAAI/bge-reranker-v2-m3` cross-encoder for reranking, `Phi-4-mini-instruct` for synthesis/extraction — demonstrating end-to-end ML pipeline design with two distinct HF models.
+6. Point to the code: flat Python, one `app.py`, four pipeline stages, `BAAI/bge-reranker-v2-m3` cross-encoder for reranking, `gemma-3-12b-it` for synthesis/extraction — demonstrating end-to-end ML pipeline design with two distinct HF models.
 
 **Key talking points:**
 - Four-stage agentic pipeline (not just a wrapper around one LLM call)
