@@ -3,11 +3,10 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from openai import OpenAI
-
 from app.config import get_settings
+from app.llm import call_json, resolve_pool
 from app.models import Paper, RerankItem, RerankOut
-from app.pipeline._json import LLMOutputError, call_json_with_fallback
+from app.pipeline._json import LLMOutputError
 from app.pipeline.embed import prefilter_by_similarity
 
 logger = logging.getLogger(__name__)
@@ -46,20 +45,23 @@ Score every paper given. Respond with ONLY that JSON object. Nothing else.\
 
 
 def _score_batch(
-    client: OpenAI, settings, topic: str, batch: list[Paper]
+    pool: list[str], topic: str, batch: list[Paper]
 ) -> tuple[list[RerankItem], int, int]:
     papers_payload = [
         {"arxiv_id": p.arxiv_id, "title": p.title, "abstract": p.abstract} for p in batch
     ]
-    result, prompt_tokens, completion_tokens = call_json_with_fallback(
-        client,
-        model=settings.llm_rerank_model,
-        fallback_model=settings.llm_fallback_model,
-        system=_SYSTEM,
-        user=_USER_TMPL.format(
-            topic=topic,
-            papers_json=json.dumps(papers_payload, ensure_ascii=False),
-        ),
+    result, prompt_tokens, completion_tokens = call_json(
+        [
+            {"role": "system", "content": _SYSTEM},
+            {
+                "role": "user",
+                "content": _USER_TMPL.format(
+                    topic=topic,
+                    papers_json=json.dumps(papers_payload, ensure_ascii=False),
+                ),
+            },
+        ],
+        pool=pool,
         max_tokens=min(32_000, 256 * len(batch) + 1024),
         schema=RerankOut,
     )
@@ -70,7 +72,7 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
     """Score candidates for relevance and return the top slice.
 
     Candidates are scored in batches of _BATCH_SIZE, run concurrently. A failed
-    batch (rate limit exhausted even after fallback, malformed output) leaves
+    batch (every model in the pool rate-limited, malformed output) leaves
     just that batch's papers unscored rather than failing the whole rerank —
     they sort last and get logged, same as an individually-unscored paper.
 
@@ -83,10 +85,7 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
     # No-op unless EMBED_PREFILTER_ENABLED — see embed.py's module docstring.
     candidates = prefilter_by_similarity(topic, candidates)
 
-    # Fewer client-side retries: a fallback model now handles the "primary is
-    # rate-limited" case, so there's no value in the SDK burning several
-    # backoff cycles against the same wall first.
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=1)
+    pool = resolve_pool(settings.llm_rerank_models, "rerank")
 
     batches = [
         candidates[i : i + _BATCH_SIZE] for i in range(0, len(candidates), _BATCH_SIZE)
@@ -99,7 +98,7 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
 
     with ThreadPoolExecutor(max_workers=min(len(batches), 5)) as executor:
         futures = {
-            executor.submit(_score_batch, client, settings, topic, batch): batch
+            executor.submit(_score_batch, pool, topic, batch): batch
             for batch in batches
         }
         for future in as_completed(futures):
@@ -136,7 +135,7 @@ def rerank_candidates(topic: str, candidates: list[Paper]) -> tuple[list[Paper],
             ", ".join(unscored[:10]),
         )
 
-    # A single batch failing (rate limit exhausted past the fallback, malformed
+    # A single batch failing (the whole pool rate-limited, malformed
     # output) shouldn't sink the whole rerank — the rest of the batches still
     # carry useful scores. But every batch failing means this stage produced
     # nothing at all, and proceeding would hand extraction an arbitrarily

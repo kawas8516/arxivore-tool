@@ -3,12 +3,10 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from openai import OpenAI
-
 from app import storage
 from app.config import get_settings
+from app.llm import call_json, resolve_pool
 from app.models import ExtractionOut, Paper
-from app.pipeline._json import call_json_with_fallback
 from app.pipeline.fulltext import fetch_excerpt
 
 logger = logging.getLogger(__name__)
@@ -50,24 +48,23 @@ _EXCERPT_BLOCK_TMPL = """
 
 
 def _extract_one(
-    paper: Paper,
-    client: OpenAI,
-    model: str,
-    fallback_model: str,
-    full_text_max_chars: int = 0,
+    paper: Paper, pool: list[str], full_text_max_chars: int = 0
 ) -> tuple[int, int]:
     # Fetched here, inside the per-paper worker, so a slow PDF for one paper
     # doesn't block the others — they're already running on separate threads.
     excerpt = fetch_excerpt(paper.arxiv_id, full_text_max_chars) if full_text_max_chars else None
     excerpt_block = _EXCERPT_BLOCK_TMPL.format(excerpt=excerpt) if excerpt else ""
-    extraction, prompt_tokens, completion_tokens = call_json_with_fallback(
-        client,
-        model=model,
-        fallback_model=fallback_model,
-        system=_SYSTEM,
-        user=_USER_TMPL.format(
-            title=paper.title, abstract=paper.abstract, excerpt_block=excerpt_block
-        ),
+    extraction, prompt_tokens, completion_tokens = call_json(
+        [
+            {"role": "system", "content": _SYSTEM},
+            {
+                "role": "user",
+                "content": _USER_TMPL.format(
+                    title=paper.title, abstract=paper.abstract, excerpt_block=excerpt_block
+                ),
+            },
+        ],
+        pool=pool,
         # A results excerpt adds real input tokens but doesn't need more output.
         max_tokens=1024,
         schema=ExtractionOut,
@@ -143,20 +140,13 @@ def extract_papers(
             to_fetch.append(paper)
 
     if to_fetch:
-        # Fewer client-side retries: a fallback model now handles the "primary is
-        # rate-limited" case, so there's no value in the SDK burning several
-        # backoff cycles against the same wall first.
-        client = OpenAI(
-            api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=1
-        )
+        pool = resolve_pool(settings.llm_rerank_models, "rerank")
         with ThreadPoolExecutor(max_workers=settings.extract_concurrency) as executor:
             futures = {
                 executor.submit(
                     _extract_one,
                     paper,
-                    client,
-                    settings.llm_extract_model,
-                    settings.llm_fallback_model,
+                    pool,
                     settings.full_text_max_chars if paper.arxiv_id in full_text_ids else 0,
                 ): paper
                 for paper in to_fetch

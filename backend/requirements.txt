@@ -8,6 +8,8 @@ openai==2.14.0
 pydantic==2.12.4
 pydantic-settings==2.12.0
 pypdf==6.6.2
+# app/llm.py fetches OpenRouter's model catalog directly for "auto" pools.
+httpx==0.28.1
 
 # dev / test / evals
 pytest==8.3.5

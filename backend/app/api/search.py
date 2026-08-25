@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app import budget, run_status
 from app.config import get_settings
+from app.llm import AllModelsRateLimited
 from app.models import SearchAccepted, SearchRequest
 from app.service import run_pipeline, PipelineError
 
@@ -82,6 +83,15 @@ def _run_in_background(run_id: str, topic: str, published_after: date | None) ->
         # Same reasoning as above, for the failure path: run_pipeline already
         # calls run_status.set_error() before raising this.
         run_status.set_error(run_id, exc.message)
+    except AllModelsRateLimited:
+        # The pool is exhausted, not broken. The POST already returned 202, so
+        # there is no 429 left to send — the distinction has to survive on the
+        # run record instead, or the UI tells the user to file a bug when the
+        # real advice is "try again in a minute".
+        logger.warning("pipeline rate-limited run_id=%s", run_id)
+        run_status.set_error(
+            run_id, "All models are rate-limited right now. Please try again in a minute."
+        )
     except Exception:
         logger.exception("unexpected pipeline crash run_id=%s", run_id)
         run_status.set_error(run_id, "Internal error")

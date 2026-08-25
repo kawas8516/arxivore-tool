@@ -46,16 +46,16 @@ def test_below_keep_threshold_skips_embedding_entirely(monkeypatch):
     get_settings.cache_clear()
 
     candidates = [_paper(f"2401.{i:04d}") for i in range(5)]  # below keep=20
-    with patch("app.pipeline.embed.OpenAI") as mock_openai_cls:
+    with patch("app.pipeline.embed._get_client") as mock_get_client:
         result = prefilter_by_similarity("a topic", candidates)
-        mock_openai_cls.assert_not_called()
+        mock_get_client.assert_not_called()
 
     assert result == candidates
     get_settings.cache_clear()
 
 
-@patch("app.pipeline.embed.OpenAI")
-def test_keeps_top_n_by_cosine_similarity(mock_openai_cls, monkeypatch):
+@patch("app.pipeline.embed._get_client")
+def test_keeps_top_n_by_cosine_similarity(mock_get_client, monkeypatch):
     monkeypatch.setenv("EMBED_PREFILTER_ENABLED", "true")
     monkeypatch.setenv("EMBED_PREFILTER_KEEP", "2")
     get_settings.cache_clear()
@@ -67,7 +67,7 @@ def test_keeps_top_n_by_cosine_similarity(mock_openai_cls, monkeypatch):
         _embedding_response([[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]),
         _embedding_response([[1.0, 0.0]]),  # topic vector — matches "close"/"closest"
     ]
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     kept = prefilter_by_similarity("a topic", candidates)
 
@@ -76,8 +76,8 @@ def test_keeps_top_n_by_cosine_similarity(mock_openai_cls, monkeypatch):
     assert len(kept) == 2
 
 
-@patch("app.pipeline.embed.OpenAI")
-def test_uses_cached_embedding_and_skips_re_embedding(mock_openai_cls, monkeypatch):
+@patch("app.pipeline.embed._get_client")
+def test_uses_cached_embedding_and_skips_re_embedding(mock_get_client, monkeypatch):
     monkeypatch.setenv("EMBED_PREFILTER_ENABLED", "true")
     monkeypatch.setenv("EMBED_PREFILTER_KEEP", "1")
     get_settings.cache_clear()
@@ -91,7 +91,7 @@ def test_uses_cached_embedding_and_skips_re_embedding(mock_openai_cls, monkeypat
         _embedding_response([[0.0, 1.0]]),  # only fresh-paper needs embedding
         _embedding_response([[1.0, 0.0]]),  # topic
     ]
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     prefilter_by_similarity("a topic", candidates)
 
@@ -101,8 +101,8 @@ def test_uses_cached_embedding_and_skips_re_embedding(mock_openai_cls, monkeypat
     get_settings.cache_clear()
 
 
-@patch("app.pipeline.embed.OpenAI")
-def test_falls_back_to_unfiltered_on_any_failure(mock_openai_cls, monkeypatch):
+@patch("app.pipeline.embed._get_client")
+def test_falls_back_to_unfiltered_on_any_failure(mock_get_client, monkeypatch):
     """An unsupported endpoint/model must degrade to today's behaviour, not
     drop candidates or crash the run."""
     monkeypatch.setenv("EMBED_PREFILTER_ENABLED", "true")
@@ -111,7 +111,7 @@ def test_falls_back_to_unfiltered_on_any_failure(mock_openai_cls, monkeypatch):
 
     mock_client = MagicMock()
     mock_client.embeddings.create.side_effect = RuntimeError("404 no such endpoint")
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     candidates = [_paper(f"2401.{i:04d}") for i in range(5)]
     result = prefilter_by_similarity("a topic", candidates)

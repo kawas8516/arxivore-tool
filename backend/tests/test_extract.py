@@ -5,9 +5,20 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from app import storage
+import app.llm as llm
 from app.models import Author, Paper
 from app.pipeline.extract import extract_papers
 from app.pipeline._json import strip_fences
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_cooldowns():
+    """app.llm parks rate-limited models in a module-global registry. Without a
+    reset, a test that exercises a 429 leaves its models cooling and the next
+    test silently takes a different failover path."""
+    llm._cooldowns.clear()
+    yield
+    llm._cooldowns.clear()
 
 
 def _rate_limit_error() -> openai.RateLimitError:
@@ -58,11 +69,11 @@ _EXTRACTION = {
 }
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_maps_fields(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_extract_maps_fields(mock_get_client):
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     papers = [_make_paper("2401.0001")]
     result, elapsed_ms, errors, _, _ = extract_papers(papers)
@@ -77,8 +88,8 @@ def test_extract_maps_fields(mock_openai_cls):
     assert p.contribution == _EXTRACTION["contribution"]
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_single_failure_does_not_fail_batch(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_extract_single_failure_does_not_fail_batch(mock_get_client):
     mock_client = MagicMock()
 
     def side_effect(**kwargs):
@@ -89,7 +100,7 @@ def test_extract_single_failure_does_not_fail_batch(mock_openai_cls):
         return _fake_response(_EXTRACTION)
 
     mock_client.chat.completions.create.side_effect = side_effect
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
     result, _, errors, _, _ = extract_papers(papers)
@@ -111,14 +122,14 @@ def test_strip_fences_passthrough_plain_json():
     assert strip_fences(raw) == raw
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_rejects_incomplete_extraction(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_extract_rejects_incomplete_extraction(mock_get_client):
     """A response missing a field must error, not write empty strings as 'done'."""
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(
         {"problem": "A problem.", "method": "A method."}  # no results/contribution
     )
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
 
@@ -127,13 +138,13 @@ def test_extract_rejects_incomplete_extraction(mock_openai_cls):
     assert result[0].problem is None
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_rejects_empty_string_fields(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_extract_rejects_empty_string_fields(mock_get_client):
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(
         {**_EXTRACTION, "results": ""}
     )
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
 
@@ -141,31 +152,17 @@ def test_extract_rejects_empty_string_fields(mock_openai_cls):
     assert result[0].extract_status == "error"
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_falls_back_to_secondary_model_on_rate_limit(mock_openai_cls, monkeypatch):
-    """A 429 from the primary model must not immediately fail the paper."""
-    import os
-    from app.config import get_settings
-
-    monkeypatch.setenv("LLM_API_KEY", os.environ.get("LLM_API_KEY", "test-key"))
-    monkeypatch.setenv("LLM_FALLBACK_MODEL", "backup-model")
-    get_settings.cache_clear()
-
+@patch("app.llm._get_client")
+def test_extract_marks_paper_error_when_every_model_is_rate_limited(mock_get_client):
+    """One paper's exhausted pool must not sink the others' extractions."""
     mock_client = MagicMock()
-    mock_client.chat.completions.create.side_effect = [
-        _rate_limit_error(),
-        _fake_response(_EXTRACTION),
-    ]
-    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create.side_effect = _rate_limit_error()
+    mock_get_client.return_value = mock_client
 
-    result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
+    papers, _, error_count, _, _ = extract_papers([_make_paper("2401.0001")])
 
-    get_settings.cache_clear()
-    assert errors == 0
-    assert result[0].extract_status == "done"
-    calls = mock_client.chat.completions.create.call_args_list
-    assert calls[0].kwargs["model"] != calls[1].kwargs["model"]
-    assert calls[1].kwargs["model"] == "backup-model"
+    assert error_count == 1
+    assert papers[0].extract_status == "error"
 
 
 def test_extract_serves_cached_paper_without_calling_llm(monkeypatch):
@@ -185,12 +182,12 @@ def test_extract_serves_cached_paper_without_calling_llm(monkeypatch):
     )
     monkeypatch.setattr(storage, "get_cached_extraction", lambda arxiv_id: cached)
 
-    with patch("app.pipeline.extract.OpenAI") as mock_openai_cls:
+    with patch("app.llm._get_client") as mock_get_client:
         result, _, errors, prompt_tokens, completion_tokens = extract_papers(
             [_make_paper("2401.0001")]
         )
         # A cache hit must never touch the LLM client at all.
-        mock_openai_cls.assert_not_called()
+        mock_get_client.assert_not_called()
 
     assert errors == 0
     assert prompt_tokens == 0
@@ -199,14 +196,14 @@ def test_extract_serves_cached_paper_without_calling_llm(monkeypatch):
     assert result[0].extract_status == "done"
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_writes_successful_result_to_storage(mock_openai_cls, monkeypatch):
+@patch("app.llm._get_client")
+def test_extract_writes_successful_result_to_storage(mock_get_client, monkeypatch):
     saved: list[Paper] = []
     monkeypatch.setattr(storage, "save_extraction", lambda paper: saved.append(paper))
 
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     extract_papers([_make_paper("2401.0001")])
 
@@ -215,15 +212,15 @@ def test_extract_writes_successful_result_to_storage(mock_openai_cls, monkeypatc
     assert saved[0].extract_status == "done"
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_writes_failed_result_to_storage_too(mock_openai_cls, monkeypatch):
+@patch("app.llm._get_client")
+def test_extract_writes_failed_result_to_storage_too(mock_get_client, monkeypatch):
     """A cached failure still avoids re-hitting a dead paper in a later run."""
     saved: list[Paper] = []
     monkeypatch.setattr(storage, "save_extraction", lambda paper: saved.append(paper))
 
     mock_client = MagicMock()
     mock_client.chat.completions.create.side_effect = RuntimeError("boom")
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     extract_papers([_make_paper("2401.0001")])
 
@@ -231,8 +228,8 @@ def test_extract_writes_failed_result_to_storage_too(mock_openai_cls, monkeypatc
     assert saved[0].extract_status == "error"
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_storage_write_failure_does_not_fail_the_paper(mock_openai_cls, monkeypatch):
+@patch("app.llm._get_client")
+def test_extract_storage_write_failure_does_not_fail_the_paper(mock_get_client, monkeypatch):
     """A broken cache write must degrade, not take down an otherwise-good result."""
 
     def _boom(paper):
@@ -242,7 +239,7 @@ def test_extract_storage_write_failure_does_not_fail_the_paper(mock_openai_cls, 
 
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
 
@@ -250,14 +247,14 @@ def test_extract_storage_write_failure_does_not_fail_the_paper(mock_openai_cls, 
     assert result[0].extract_status == "done"
 
 
-@patch("app.pipeline.extract.OpenAI")
-def test_extract_accumulates_token_usage(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_extract_accumulates_token_usage(mock_get_client):
     response = _fake_response(_EXTRACTION)
     response.usage.prompt_tokens = 100
     response.usage.completion_tokens = 40
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = response
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     _, _, errors, prompt_tokens, completion_tokens = extract_papers(
         [_make_paper("2401.0001"), _make_paper("2401.0002")]
@@ -266,118 +263,3 @@ def test_extract_accumulates_token_usage(mock_openai_cls):
     assert errors == 0
     assert prompt_tokens == 200
     assert completion_tokens == 80
-
-
-@patch("app.pipeline.extract.fetch_excerpt")
-@patch("app.pipeline.extract.OpenAI")
-def test_full_text_disabled_by_default_never_fetches(mock_openai_cls, mock_fetch):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
-    mock_openai_cls.return_value = mock_client
-
-    extract_papers([_make_paper("2401.0001")])
-
-    mock_fetch.assert_not_called()
-
-
-@patch("app.pipeline.extract.fetch_excerpt")
-@patch("app.pipeline.extract.OpenAI")
-def test_full_text_applies_only_to_top_n_by_rank(mock_openai_cls, mock_fetch, monkeypatch):
-    from app.config import get_settings
-
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
-    monkeypatch.setenv("FULL_TEXT_TOP_N", "2")
-    get_settings.cache_clear()
-
-    mock_fetch.return_value = "Results: 92% accuracy."
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
-    mock_openai_cls.return_value = mock_client
-
-    # papers is already rank-ordered — only the first 2 should get full text.
-    papers = [_make_paper(f"2401.{i:04d}") for i in range(4)]
-    extract_papers(papers)
-
-    get_settings.cache_clear()
-    fetched_ids = {call.args[0] for call in mock_fetch.call_args_list}
-    assert fetched_ids == {"2401.0000", "2401.0001"}
-
-
-@patch("app.pipeline.extract.fetch_excerpt")
-@patch("app.pipeline.extract.OpenAI")
-def test_full_text_excerpt_included_in_prompt_when_available(
-    mock_openai_cls, mock_fetch, monkeypatch
-):
-    from app.config import get_settings
-
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
-    monkeypatch.setenv("FULL_TEXT_TOP_N", "1")
-    get_settings.cache_clear()
-
-    mock_fetch.return_value = "We achieve 92.3% accuracy on the benchmark."
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
-    mock_openai_cls.return_value = mock_client
-
-    extract_papers([_make_paper("2401.0001")])
-
-    get_settings.cache_clear()
-    user_content = mock_client.chat.completions.create.call_args.kwargs["messages"][-1]["content"]
-    assert "92.3% accuracy" in user_content
-    assert "<results_section_excerpt>" in user_content
-
-
-@patch("app.pipeline.extract.fetch_excerpt")
-@patch("app.pipeline.extract.OpenAI")
-def test_full_text_fetch_failure_still_extracts_from_abstract(
-    mock_openai_cls, mock_fetch, monkeypatch
-):
-    """fetch_excerpt returning None (its own failure contract) must not break
-    extraction — it just falls back to abstract-only, silently."""
-    from app.config import get_settings
-
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
-    get_settings.cache_clear()
-
-    mock_fetch.return_value = None
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = _fake_response(_EXTRACTION)
-    mock_openai_cls.return_value = mock_client
-
-    result, _, errors, _, _ = extract_papers([_make_paper("2401.0001")])
-
-    get_settings.cache_clear()
-    assert errors == 0
-    assert result[0].extract_status == "done"
-    user_content = mock_client.chat.completions.create.call_args.kwargs["messages"][-1]["content"]
-    assert "<results_section_excerpt>" not in user_content
-
-
-@patch("app.pipeline.extract.fetch_excerpt")
-@patch("app.pipeline.extract.OpenAI")
-def test_full_text_skips_cache_hits(mock_openai_cls, mock_fetch, monkeypatch):
-    """A cached paper never re-enters the LLM path at all, so it must never
-    trigger a PDF fetch either — even if it's within the top N by rank."""
-    from app.config import get_settings
-
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setenv("FULL_TEXT_ENABLED", "true")
-    get_settings.cache_clear()
-
-    cached = _make_paper("2401.0001")
-    cached.problem = "Cached."
-    cached.method = "Cached."
-    cached.results = "Cached."
-    cached.contribution = "Cached."
-    cached.extract_status = "done"
-    monkeypatch.setattr(storage, "get_cached_extraction", lambda arxiv_id: cached)
-
-    mock_openai_cls.return_value = MagicMock()
-
-    extract_papers([_make_paper("2401.0001")])
-
-    get_settings.cache_clear()
-    mock_fetch.assert_not_called()

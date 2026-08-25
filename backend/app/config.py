@@ -13,20 +13,36 @@ class Settings(BaseSettings):
 
     llm_api_key: str
     llm_base_url: str = "https://openrouter.ai/api/v1"
-    # Model IDs must exist in the provider catalog. A retired ID fails the whole
-    # stage at runtime, so verify against GET {llm_base_url}/models before
-    # changing these (see tests/test_config.py).
+
+    # Ordered failover pools, strongest-first: comma-separated model ids, or the
+    # literal "auto" to discover free models from OpenRouter's catalog at
+    # runtime. Position 0 is what serves a healthy request, so accuracy is
+    # unchanged until a model is rate-limited and app/llm.py descends the list.
+    #
+    # Model IDs must exist in the provider catalog. A retired ID at position 0
+    # costs a failover rather than the stage, but verify against
+    # GET {llm_base_url}/models anyway (see tests/test_config.py).
+    llm_synthesis_models: str = (
+        "nvidia/nemotron-3-ultra-550b-a55b:free,"
+        "nvidia/nemotron-3-super-120b-a12b:free,"
+        "google/gemma-4-31b-it:free,"
+        "minimax/minimax-m3:free"
+    )
+    llm_rerank_models: str = (
+        "google/gemma-4-31b-it:free,"
+        "nvidia/nemotron-3-super-120b-a12b:free,"
+        "google/gemma-4-26b-a4b-it:free,"
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    )
+    # When a model returns 429, skip it for this long (used when the upstream
+    # Retry-After header is absent), and how long the "auto" catalog is cached.
+    llm_cooldown_seconds: int = 60
+    llm_models_cache_ttl: int = 3600
+
+    # Legacy single-model vars — kept so older .env files still boot. Each is the
+    # position-0 default of the corresponding pool above.
     llm_synthesis_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
-    llm_rerank_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
-    # Extraction is per-paper and accuracy-sensitive, so it gets its own setting
-    # rather than reusing the rerank model.
-    llm_extract_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
-    # Query expansion is a cheap single call; reuse the rerank-tier model.
-    llm_expand_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
-    # On a 429 from the primary model, retry once against this model instead of
-    # exhausting client-side retries against a daily quota that won't recover
-    # mid-run. Empty disables fallback (raises RateLimitExceeded as before).
-    llm_fallback_model: str = ""
+    llm_rerank_model: str = "google/gemma-4-31b-it:free"
 
     # Off by default: OpenRouter's /embeddings coverage is much narrower than
     # its chat-completions catalog, and support for a given model is unverified

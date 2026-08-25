@@ -1,0 +1,359 @@
+"""Single entry point for all LLM calls, with multi-model failover.
+
+Every pipeline stage (expand, rerank, extract, synthesize) goes through
+`call_json()`, which layers JSON mode and schema validation over `complete()`.
+It talks to OpenRouter (OpenAI-compatible) and gives us resilience against the
+free tier's per-model rate limits:
+
+* **Native fallback** — each request carries OpenRouter's `models[]` array, so a
+  rate-limited model is skipped *inside a single request* before any output
+  tokens are generated (token-optimal).
+* **Cooldown memory** — when the whole pool comes back 429, every attempted
+  model is parked for a cooldown window so the *next* call doesn't waste a
+  round-trip on a model we already know is limited.
+
+Pool ordering is strongest-first and position 0 is the model used today, so a
+healthy request is identical to before — failover only ever *descends* the list
+under rate-limit pressure.
+
+Pools come from config as a comma-separated list, or the literal ``auto`` to
+discover free models from OpenRouter's catalog at runtime (gated server-side by
+the account's allowed-models list).
+"""
+
+import logging
+import threading
+import time
+from typing import TypeVar
+
+import httpx
+from openai import APIStatusError, BadRequestError, OpenAI, RateLimitError
+from pydantic import BaseModel
+
+from app.config import get_settings
+from app.pipeline._json import parse_model, strip_fences, usage_of
+
+logger = logging.getLogger(__name__)
+
+M = TypeVar("M", bound=BaseModel)
+
+# Ask the provider for JSON mode. Not every model on a routing provider honours
+# it, so this is an optimisation on top of parsing, never a substitute for it.
+_JSON_MODE = {"type": "json_object"}
+
+
+class AllModelsRateLimited(Exception):
+    """Raised when every model in a pool is rate-limited / unavailable."""
+
+
+# --- shared client (created once; reused across stages and threads) ----------
+_client: OpenAI | None = None
+_client_lock = threading.Lock()
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        with _client_lock:
+            if _client is None:
+                settings = get_settings()
+                _client = OpenAI(
+                    api_key=settings.llm_api_key,
+                    base_url=settings.llm_base_url,
+                    max_retries=2,
+                )
+    return _client
+
+
+# --- per-model cooldown registry (thread-safe; extract runs concurrently) ----
+_cooldowns: dict[str, float] = {}
+_cooldown_lock = threading.Lock()
+
+
+def _is_cooling(model: str) -> bool:
+    with _cooldown_lock:
+        until = _cooldowns.get(model)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            del _cooldowns[model]
+            return False
+        return True
+
+
+def _cool(models: list[str], seconds: float) -> None:
+    until = time.monotonic() + seconds
+    with _cooldown_lock:
+        for m in models:
+            _cooldowns[m] = until
+
+
+# A model that has been withdrawn from the catalog comes back 400/404, not 429,
+# so rate-limit failover never saw it and the whole stage died on a config that
+# was fine last month. These are the shapes OpenRouter uses to say "that id is
+# not servable" — matched on the message because the status code alone cannot
+# distinguish them from a genuinely malformed request.
+_UNKNOWN_MODEL_HINTS = (
+    "not a valid model",
+    "no endpoints found",
+    "no allowed providers",
+    "unknown model",
+    "model not found",
+    "does not exist",
+)
+
+
+def _is_unknown_model_error(exc: APIStatusError) -> bool:
+    """True when the provider is rejecting the model id itself, not the request."""
+    if exc.status_code not in (400, 403, 404):
+        return False
+    message = str(getattr(exc, "message", "") or exc)
+    return any(hint in message.lower() for hint in _UNKNOWN_MODEL_HINTS)
+
+
+def _retry_after_seconds(exc: RateLimitError, default: float) -> float:
+    """Best-effort parse of the Retry-After header; fall back to the default."""
+    try:
+        raw = exc.response.headers.get("retry-after")
+    except Exception:
+        raw = None
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass  # HTTP-date form — not worth parsing; use default
+    return default
+
+
+# --- model pool resolution ---------------------------------------------------
+# discover_free_models() result is cached for llm_models_cache_ttl seconds so the
+# `auto` mode picks up OpenRouter changes without a restart or per-call fetch.
+_catalog_cache: dict | None = None
+_catalog_expires: float = 0.0
+_catalog_lock = threading.Lock()
+
+_SYNTHESIS_MIN_CONTEXT = 131072  # synthesis reads all retained papers at once
+
+# Free models that aren't usable as chat/JSON producers (rerankers, embeddings,
+# audio, content-safety, vision-only). Matched as substrings of the model id.
+_NON_CHAT_HINTS = (
+    "rerank",
+    "embed",
+    "guard",
+    "safety",
+    "moderation",
+    "lyria",
+    "whisper",
+    "tts",
+)
+
+
+def _is_free(model: dict) -> bool:
+    pricing = model.get("pricing") or {}
+    prompt = str(pricing.get("prompt", "1"))
+    completion = str(pricing.get("completion", "1"))
+    return prompt in ("0", "0.0") and completion in ("0", "0.0")
+
+
+def _is_text_chat(model: dict) -> bool:
+    mid = model.get("id", "").lower()
+    if any(hint in mid for hint in _NON_CHAT_HINTS):
+        return False
+    arch = model.get("architecture") or {}
+    inputs = arch.get("input_modalities") or []
+    outputs = arch.get("output_modalities") or []
+    modality = arch.get("modality") or ""
+    # Newer schema lists modalities; older one uses a "text->text" string.
+    if outputs:
+        return "text" in outputs and "text" in (inputs or ["text"])
+    if modality:
+        return modality.endswith("text") and modality.startswith("text")
+    return True  # unknown schema — assume usable rather than over-filter
+
+
+def discover_free_models() -> dict[str, list[str]]:
+    """Fetch OpenRouter's catalog and build two ordered free-model pools.
+
+    Returns ``{"synthesis": [...], "rerank": [...]}`` ordered context-length
+    desc. Cached for the configured TTL. On any failure, falls back to the
+    curated lists in config so the app never hard-fails on a flaky catalog call.
+    """
+    global _catalog_cache, _catalog_expires
+    now = time.monotonic()
+    with _catalog_lock:
+        if _catalog_cache is not None and now < _catalog_expires:
+            return _catalog_cache
+
+    settings = get_settings()
+    try:
+        resp = httpx.get(
+            f"{settings.llm_base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+    except Exception:
+        logger.warning("auto model discovery failed; using curated defaults", exc_info=True)
+        return {
+            "synthesis": _split_csv(settings.llm_synthesis_models),
+            "rerank": _split_csv(settings.llm_rerank_models),
+        }
+
+    chat = [m for m in data if _is_free(m) and _is_text_chat(m)]
+    chat.sort(key=lambda m: -(m.get("context_length") or 0))
+    ids = [m["id"] for m in chat]
+    pools = {
+        "synthesis": [
+            m["id"] for m in chat if (m.get("context_length") or 0) >= _SYNTHESIS_MIN_CONTEXT
+        ]
+        or ids,
+        "rerank": ids,
+    }
+    logger.info(
+        "discovered free models: synthesis=%d rerank=%d",
+        len(pools["synthesis"]),
+        len(pools["rerank"]),
+    )
+    with _catalog_lock:
+        _catalog_cache = pools
+        _catalog_expires = time.monotonic() + settings.llm_models_cache_ttl
+    return pools
+
+
+def _split_csv(spec: str) -> list[str]:
+    return [s.strip() for s in spec.split(",") if s.strip()]
+
+
+def resolve_pool(spec: str, kind: str) -> list[str]:
+    """Turn a config spec into an ordered model list.
+
+    ``kind`` is "synthesis" or "rerank"; only used when ``spec`` is "auto".
+    """
+    if spec.strip().lower() == "auto":
+        return discover_free_models()[kind]
+    return _split_csv(spec)
+
+
+# --- the one call everyone uses ----------------------------------------------
+def complete(
+    messages: list[dict],
+    *,
+    pool: list[str],
+    max_tokens: int,
+    response_format: dict | None = None,
+) -> tuple[str, int, int]:
+    """Run a chat completion against the pool, failing over on rate limits.
+
+    Returns ``(content, prompt_tokens, completion_tokens)``. The token counts
+    feed `budget.add()`, so they travel with the content rather than being
+    re-derived by callers that no longer hold the response object. Raises
+    ``AllModelsRateLimited`` when the whole pool is unavailable, or the
+    underlying error for non-rate-limit failures.
+
+    Two things descend the pool: a rate limit, and a model id the provider will
+    not serve at all. The second matters because model ids get withdrawn — the
+    stage should lose one pool entry, not fail outright.
+    """
+    if not pool:
+        raise AllModelsRateLimited("model pool is empty")
+
+    settings = get_settings()
+    client = _get_client()
+
+    # Skip models we already know are cooling; if all are cooling, try the full
+    # pool anyway (cooldowns may have just lifted, or it's our only shot).
+    available = [m for m in pool if not _is_cooling(m)] or list(pool)
+
+    kwargs = {}
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+
+    response = None
+    while response is None:
+        try:
+            # Native fallback: model=available[0] is primary, the rest are tried
+            # in-order within this single request before any tokens are produced.
+            # OpenRouter caps the fallback array at 3 models per request.
+            response = client.chat.completions.create(
+                model=available[0],
+                max_tokens=max_tokens,
+                messages=messages,
+                extra_body={"models": available[:3]},
+                **kwargs,
+            )
+        except RateLimitError as exc:
+            # OpenRouter exhausted the whole list and still hit a limit — park them.
+            cooldown = _retry_after_seconds(exc, settings.llm_cooldown_seconds)
+            _cool(available, cooldown)
+            logger.warning(
+                "all %d models rate-limited; cooling for %.0fs", len(available), cooldown
+            )
+            raise AllModelsRateLimited(
+                f"all {len(available)} models rate-limited"
+            ) from exc
+        except APIStatusError as exc:
+            if exc.status_code and 500 <= exc.status_code < 600:
+                raise AllModelsRateLimited("upstream model error") from exc
+            if not _is_unknown_model_error(exc):
+                raise
+            # The id is not servable — a withdrawn model, or one this account is
+            # not allowed. Retrying it costs a round-trip on every call for the
+            # rest of the process, so park it and retry with what is left.
+            #
+            # Drop only the ids the error actually names; the request carries up
+            # to 3 models and discarding all of them would throw away working
+            # ones. When the message names none, drop the primary — that still
+            # shortens the list every pass, so the loop terminates.
+            message = str(getattr(exc, "message", "") or exc)
+            rejected = [m for m in available[:3] if m in message] or available[:1]
+            _cool(rejected, settings.llm_models_cache_ttl)
+            available = [m for m in available if m not in rejected]
+            logger.warning(
+                "model(s) %s rejected as unservable (%s); %d left in pool",
+                ", ".join(rejected),
+                exc.status_code,
+                len(available),
+            )
+            if not available:
+                raise AllModelsRateLimited(
+                    "no servable model left in pool — every id was rejected"
+                ) from exc
+
+    content = response.choices[0].message.content if response.choices else None
+    if not content:
+        raise ValueError("model returned empty content")
+    used = getattr(response, "model", None) or available[0]
+    if used != available[0]:
+        # OpenRouter's inner fallback served from a different model — the primary
+        # is rate-limited at their end. Cool it now so subsequent calls in this
+        # run skip it directly rather than waiting for OpenRouter to reroute again.
+        _cool([available[0]], settings.llm_cooldown_seconds)
+        logger.info("failed over to model=%s; cooling primary=%s", used, available[0])
+
+    prompt_tokens, completion_tokens = usage_of(response)
+    return strip_fences(content.strip()), prompt_tokens, completion_tokens
+
+
+def call_json(
+    messages: list[dict], *, pool: list[str], max_tokens: int, schema: type[M]
+) -> tuple[M, int, int]:
+    """Call the pool expecting JSON, and validate it against `schema`.
+
+    Returns ``(validated, prompt_tokens, completion_tokens)``. Raises
+    ``AllModelsRateLimited`` when the pool is exhausted, or ``LLMOutputError``
+    if the response is unparseable or off-schema.
+    """
+    try:
+        raw, prompt_tokens, completion_tokens = complete(
+            messages, pool=pool, max_tokens=max_tokens, response_format=_JSON_MODE
+        )
+    except BadRequestError:
+        # A model or route rejected response_format; parsing handles it anyway.
+        # Only a 400 falls through here — rate limits and auth errors propagate
+        # rather than burning a second call.
+        raw, prompt_tokens, completion_tokens = complete(
+            messages, pool=pool, max_tokens=max_tokens
+        )
+
+    return parse_model(raw, schema), prompt_tokens, completion_tokens

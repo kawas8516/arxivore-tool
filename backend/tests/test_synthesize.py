@@ -2,9 +2,20 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
+import app.llm as llm
 from app.models import Author, Paper
 from app.pipeline._json import LLMOutputError
 from app.pipeline.synthesize import synthesize_landscape
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_cooldowns():
+    """app.llm parks rate-limited models in a module-global registry. Without a
+    reset, a test that exercises a 429 leaves its models cooling and the next
+    test silently takes a different failover path."""
+    llm._cooldowns.clear()
+    yield
+    llm._cooldowns.clear()
 
 
 def _make_paper(arxiv_id: str, status: str = "done") -> Paper:
@@ -61,11 +72,11 @@ _LANDSCAPE = {
 }
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_parses_landscape(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_synthesize_parses_landscape(mock_get_client):
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(_LANDSCAPE)
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
     landscape, elapsed_ms, _, _ = synthesize_landscape("retrieval", papers)
@@ -80,11 +91,11 @@ def test_synthesize_parses_landscape(mock_openai_cls):
     assert landscape.open_problems == _LANDSCAPE["open_problems"]
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_only_sends_extracted_papers(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_synthesize_only_sends_extracted_papers(mock_get_client):
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(_LANDSCAPE)
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     papers = [
         _make_paper("2401.0001", status="done"),
@@ -101,19 +112,19 @@ def test_synthesize_only_sends_extracted_papers(mock_openai_cls):
     assert "2401.0002" not in user_content
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_rejects_empty_landscape(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_synthesize_rejects_empty_landscape(mock_get_client):
     """`{}` used to validate as a successful-but-blank landscape."""
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response({})
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     with pytest.raises(LLMOutputError):
         synthesize_landscape("retrieval", [_make_paper("2401.0001")])
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_prunes_hallucinated_ids_and_relationships(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_synthesize_prunes_hallucinated_ids_and_relationships(mock_get_client):
     hallucinated = {
         "clusters": [
             {
@@ -136,7 +147,7 @@ def test_synthesize_prunes_hallucinated_ids_and_relationships(mock_openai_cls):
     }
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value = _fake_response(hallucinated)
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     landscape, _, _, _ = synthesize_landscape("retrieval", [_make_paper("2401.0001")])
 
@@ -144,8 +155,8 @@ def test_synthesize_prunes_hallucinated_ids_and_relationships(mock_openai_cls):
     assert landscape.relationships == []
 
 
-@patch("app.pipeline.synthesize.OpenAI")
-def test_synthesize_handles_markdown_fenced_json(mock_openai_cls):
+@patch("app.llm._get_client")
+def test_synthesize_handles_markdown_fenced_json(mock_get_client):
     mock_client = MagicMock()
     fenced = MagicMock()
     fenced.content = "```json\n" + json.dumps(_LANDSCAPE) + "\n```"
@@ -154,7 +165,7 @@ def test_synthesize_handles_markdown_fenced_json(mock_openai_cls):
     response = MagicMock()
     response.choices = [choice]
     mock_client.chat.completions.create.return_value = response
-    mock_openai_cls.return_value = mock_client
+    mock_get_client.return_value = mock_client
 
     # All three papers must be present: _LANDSCAPE references all three ids, and
     # cross-reference pruning would otherwise strip the missing ones and empty a

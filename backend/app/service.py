@@ -3,6 +3,7 @@ import uuid
 from datetime import date
 
 from app import budget, run_status, storage
+from app.llm import AllModelsRateLimited
 from app.models import SearchResponse
 from app.pipeline.expand import expand_query
 from app.pipeline.retrieve import retrieve_candidates
@@ -86,6 +87,15 @@ def run_pipeline(
         ranked, rerank_ms, used_prompt, used_completion = rerank_candidates(topic, candidates)
         prompt_tokens += used_prompt
         completion_tokens += used_completion
+    except AllModelsRateLimited:
+        # Every model in the pool is rate-limited. That is a "come back later",
+        # not a broken pipeline, so it must reach the client as 429 — wrapping it
+        # in PipelineError here would surface it as a 502 and read as our bug.
+        logger.warning("rerank rate-limited topic=%r", topic)
+        budget.add(prompt_tokens, completion_tokens)
+        run_status.set_stage(run_id, "rerank", status="error")
+        run_status.set_error(run_id, "All models are rate-limited")
+        raise
     except Exception as exc:
         logger.exception("rerank failed topic=%r", topic)
         # Tokens already spent still count against the budget.

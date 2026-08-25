@@ -10,10 +10,10 @@ rerank anyway, and rerank is what actually decides relevance.
 import logging
 import math
 
-from openai import OpenAI
 
 from app import storage
 from app.config import get_settings
+from app.llm import _get_client
 from app.models import Paper
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _embed_and_cache(
-    client: OpenAI, model: str, arxiv_ids: list[str], texts: list[str]
+    client, model: str, arxiv_ids: list[str], texts: list[str]
 ) -> dict[str, list[float]]:
     if not texts:
         return {}
@@ -59,9 +59,11 @@ def prefilter_by_similarity(topic: str, candidates: list[Paper]) -> list[Paper]:
         return candidates
 
     try:
-        client = OpenAI(
-            api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=1
-        )
+        # Same credentials and base URL as every other call, so reuse app.llm's
+        # singleton rather than standing up a second client. This is the one
+        # place that hits /embeddings instead of /chat/completions, which is why
+        # it calls the client directly instead of going through llm.call_json.
+        client = _get_client()
         model = settings.llm_embedding_model
 
         cached: dict[str, list[float]] = {}

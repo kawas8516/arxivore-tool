@@ -2,11 +2,9 @@ import json
 import logging
 import time
 
-from openai import OpenAI
-
 from app.config import get_settings
+from app.llm import call_json, resolve_pool
 from app.models import Landscape, Paper
-from app.pipeline._json import call_json
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +85,9 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
     a single high-value call).
     """
     settings = get_settings()
-    client = OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url, max_retries=5)
+    # Synthesis reads every retained paper in one call, so it needs the
+    # long-context tier — hence the synthesis pool, not the rerank one.
+    pool = resolve_pool(settings.llm_synthesis_models, "synthesis")
 
     # Only feed papers that were successfully extracted; pass the distilled
     # fields, not raw abstracts — keeps the synthesis prompt compact.
@@ -106,13 +106,17 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
 
     start = time.monotonic()
     landscape, prompt_tokens, completion_tokens = call_json(
-        client,
-        model=settings.llm_synthesis_model,
-        system=_SYSTEM,
-        user=_USER_TMPL.format(
-            topic=topic,
-            papers_json=json.dumps(papers_payload, ensure_ascii=False),
-        ),
+        [
+            {"role": "system", "content": _SYSTEM},
+            {
+                "role": "user",
+                "content": _USER_TMPL.format(
+                    topic=topic,
+                    papers_json=json.dumps(papers_payload, ensure_ascii=False),
+                ),
+            },
+        ],
+        pool=pool,
         max_tokens=8192,
         schema=Landscape,
     )
