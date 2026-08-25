@@ -100,14 +100,16 @@ Status as of the v1 backend (single-server FastAPI + Alpine UI):
 - [x] `.env` gitignored; `.env.example` present.
 - [x] Rate limiting (per-IP, `RATE_LIMIT_PER_MINUTE`) + concurrency cap
       (`MAX_CONCURRENT_RUNS`) enforced on `/api/search`.
-- [ ] Global spend ceiling — `DAILY_TOKEN_BUDGET` is defined but token
-      accounting is **not yet wired**; bounded for now by candidate/token caps,
-      rate limit, and concurrency cap. See "Known gaps" below.
+- [x] Global spend ceiling — `app/budget.py` accounts prompt/completion tokens
+      from `response.usage` and `/api/search` rejects with 429 once
+      `DAILY_TOKEN_BUDGET` is hit. Checked before a run starts, so the ceiling
+      overshoots by at most one in-flight run.
 - [x] CORS locked to known origins (no wildcard); UI is served same-origin.
 - [x] Security headers set (CSP, X-Content-Type-Options, X-Frame-Options,
       Referrer-Policy). HTTPS to be enforced at the proxy/host in production.
 - [x] Input validation (Pydantic) on every endpoint (topic length/charset).
-- [ ] Parameterized DB access — N/A until persistence (M5) lands.
+- [x] Parameterized DB access — `app/storage.py` binds every value; no string
+      interpolation into SQL.
 - [~] Secret scanning — a local **pre-commit secret guard** is in place
       (`scripts/git-hooks/pre-commit`, activated via `core.hooksPath`); CI-side
       scanning + dependency audit still pending.
@@ -116,12 +118,13 @@ Status as of the v1 backend (single-server FastAPI + Alpine UI):
 
 ### Known gaps (tracked, accepted for single-user v1)
 
-- **Spend ceiling not enforced.** Implement token accounting from LLM
-  `response.usage` and hard-stop when `DAILY_TOKEN_BUDGET` is hit (do before any
-  public, multi-user exposure).
 - **No CI secret scanning / dependency audit.** A local pre-commit guard exists
   (`scripts/git-hooks/pre-commit`); still add `gitleaks` + `pip-audit` in CI
   before opening the repo to external contributors.
+- **The pre-commit guard does not match Hugging Face tokens.** It covers
+  `sk-or-*`, AWS keys, `ghp_*`, and private keys, but not `hf_*` — and an
+  `HF_TOKEN` is now in play for the Space. Add the pattern before anyone commits
+  one.
 - **No auth** (see §7) — assumes single-user / trusted deployment.
 
 ## 6a. Before Going Public
@@ -141,6 +144,9 @@ Run through this once before flipping the GitHub repo to public visibility.
       `scripts/git-hooks`. New clones must run this once (it is not auto-applied
       on clone).
 - [ ] **Skim the diff that goes public** for stray tokens, internal URLs, or PII.
+- [ ] **Check the Space repo too.** `huggingface.co/spaces/kawas8516/arxivore`
+      is a separate git repo pushed by hand — a secret scrubbed here is still
+      exposed if it was ever committed there.
 
 > The hook is local. For real enforcement on a public repo, also add a
 > server-side secret scan (GitHub secret scanning / `gitleaks` Action).

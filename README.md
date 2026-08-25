@@ -96,17 +96,19 @@ fuller OpenRouter-backed implementation and is not part of the Space build.
                          └────────────────────────────┘
 ```
 
-> **Status:** Stages 1–4 are implemented and unit-tested (backend). Live
-> streaming progress (M4) and persistence / reading map (M5) are next.
+> **Status:** Stages 1–4 implemented and unit-tested, with live SSE progress
+> (M4) and SQLite persistence + reading map (M5) landed. The backend runs on
+> ordered model-failover pools; see `app/llm.py`.
 
 ## Stack
 
 | Layer | Tech |
 |-------|------|
 | Backend | FastAPI · Python · `arxiv` library |
-| LLM | OpenAI-compatible client → OpenRouter (free Llama / Nemotron by default) |
-| Frontend | Next.js · Tailwind CSS · TypeScript *(planned — see note below)* |
-| Storage | SQLite (planned, v1) |
+| LLM | OpenAI-compatible client → OpenRouter, with ordered free-model failover pools |
+| Frontend (backend UI) | Single static `index.html` — Alpine.js + Tailwind, no Node |
+| Frontend (Space) | Gradio, at the repo root |
+| Storage | SQLite — run history, reading map, extraction cache |
 
 ## Quick start
 
