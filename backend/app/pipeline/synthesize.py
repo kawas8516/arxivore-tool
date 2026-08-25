@@ -3,7 +3,7 @@ import logging
 import time
 
 from app.config import get_settings
-from app.llm import complete, resolve_pool, strip_fences
+from app.llm import call_json, resolve_pool
 from app.models import Landscape, Paper
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ Synthesize them into a research landscape.
 </papers>
 
 Return a JSON object with exactly these keys:
-  "clusters" — array of objects, each:
+  "clusters" — non-empty array of objects, each:
       "name"      — short cluster label (3–6 words)
       "summary"   — 1–2 sentences describing the cluster's shared theme/approach
       "arxiv_ids" — array of arxiv_id strings for papers in this cluster
@@ -44,14 +44,49 @@ JSON object. Nothing else.\
 """
 
 
-def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, int]:
+def _prune_hallucinations(landscape: Landscape, known_ids: set[str]) -> Landscape:
+    """Drop references the model invented.
+
+    The prompt asks for grounded arxiv_ids and real cluster names; asking is not
+    enforcing. Unknown ids and dangling relationship endpoints are removed here
+    so the UI never renders a paper or cluster that does not exist.
+    """
+    dropped_ids: list[str] = []
+    for cluster in landscape.clusters:
+        kept = [i for i in cluster.arxiv_ids if i in known_ids]
+        dropped_ids.extend(i for i in cluster.arxiv_ids if i not in known_ids)
+        cluster.arxiv_ids = kept
+
+    cluster_names = {c.name for c in landscape.clusters}
+    before = len(landscape.relationships)
+    landscape.relationships = [
+        r
+        for r in landscape.relationships
+        if r.from_cluster in cluster_names and r.to_cluster in cluster_names
+    ]
+    dropped_rels = before - len(landscape.relationships)
+
+    if dropped_ids or dropped_rels:
+        logger.warning(
+            "synthesize pruned %d unknown arxiv_ids (%s) and %d dangling relationships",
+            len(dropped_ids),
+            ", ".join(dropped_ids[:10]),
+            dropped_rels,
+        )
+    return landscape
+
+
+def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, int, int, int]:
     """Cross-read extracted papers into a research landscape.
 
     Only papers with a successful extraction are sent to the LLM. Returns
-    (Landscape, elapsed_ms). Raises on LLM/parse failure — the caller decides
-    how to surface it (synthesis is a single high-value call).
+    (Landscape, elapsed_ms, prompt_tokens, completion_tokens). Raises on
+    LLM/parse/schema failure — the caller decides how to surface it (synthesis is
+    a single high-value call).
     """
     settings = get_settings()
+    # Synthesis reads every retained paper in one call, so it needs the
+    # long-context tier — hence the synthesis pool, not the rerank one.
     pool = resolve_pool(settings.llm_synthesis_models, "synthesis")
 
     # Only feed papers that were successfully extracted; pass the distilled
@@ -70,7 +105,7 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
     ]
 
     start = time.monotonic()
-    content = complete(
+    landscape, prompt_tokens, completion_tokens = call_json(
         [
             {"role": "system", "content": _SYSTEM},
             {
@@ -82,13 +117,12 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
             },
         ],
         pool=pool,
-        max_tokens=4096,
+        max_tokens=8192,
+        schema=Landscape,
     )
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
-    raw = strip_fences(content.strip())
-    data: dict = json.loads(raw)
-    landscape = Landscape.model_validate(data)
+    landscape = _prune_hallucinations(landscape, {p.arxiv_id for p in extracted})
 
     logger.info(
         "synthesize done topic=%r papers=%d clusters=%d relationships=%d "
@@ -101,4 +135,4 @@ def synthesize_landscape(topic: str, papers: list[Paper]) -> tuple[Landscape, in
         len(landscape.open_problems),
         elapsed_ms,
     )
-    return landscape, elapsed_ms
+    return landscape, elapsed_ms, prompt_tokens, completion_tokens

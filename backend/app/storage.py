@@ -13,11 +13,14 @@ per-run read_status would have no way to resolve which row to update — read
 state is inherently global to a paper, not to the run that surfaced it.
 
 Second deviation: embeddings live in their own table, not a column on `papers`.
-The embedding prefilter (pipeline/embed.py) runs before rerank — before
-extraction, before a paper has ever earned a `papers` row — so a column there
-would mean either inserting a half-populated row early or losing the cache for
-every candidate that gets filtered out before extraction. A standalone table
-keyed on arxiv_id has neither problem.
+An embedding prefilter runs before rerank — before extraction, before a paper
+has ever earned a `papers` row — so a column there would mean either inserting a
+half-populated row early or losing the cache for every candidate filtered out
+before extraction. A standalone table keyed on arxiv_id has neither problem.
+
+The prefilter itself is not enabled on this branch (see the free-tier notes in
+README.md), so the `embeddings` table is currently unused. It stays in the
+schema so turning the prefilter back on needs no migration.
 """
 
 import array

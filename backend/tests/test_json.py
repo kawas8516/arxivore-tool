@@ -1,6 +1,4 @@
 import json
-import httpx
-import openai
 import pytest
 from unittest.mock import MagicMock
 
@@ -8,14 +6,14 @@ from pydantic import BaseModel, Field
 
 from app.pipeline._json import (
     LLMOutputError,
-    RateLimitExceeded,
-    call_json,
-    call_json_with_fallback,
     content_of,
     parse_model,
     strip_fences,
     usage_of,
 )
+
+# _json.py is parsing and accounting only. The request itself, model failover,
+# and rate-limit handling live in app/llm.py and are covered by test_llm.py.
 
 
 class _Sample(BaseModel):
@@ -85,78 +83,3 @@ def test_usage_of_defaults_when_absent():
 def test_usage_of_defaults_when_not_integers():
     """A bare MagicMock yields MagicMock attributes; accounting must not break."""
     assert usage_of(MagicMock()) == (0, 0)
-
-
-def _rate_limit_error() -> openai.RateLimitError:
-    request = httpx.Request("POST", "https://example.com")
-    response = httpx.Response(429, request=request)
-    return openai.RateLimitError("rate limited", response=response, body=None)
-
-
-def test_call_json_raises_rate_limit_exceeded_on_429():
-    client = MagicMock()
-    client.chat.completions.create.side_effect = _rate_limit_error()
-
-    with pytest.raises(RateLimitExceeded):
-        call_json(
-            client, model="m", system="s", user="u", max_tokens=10, schema=_Sample
-        )
-
-
-def test_call_json_with_fallback_retries_on_rate_limit():
-    client = MagicMock()
-    client.chat.completions.create.side_effect = [
-        _rate_limit_error(),
-        _response(json.dumps({"name": "ok", "count": 1})),
-    ]
-
-    result, _, _ = call_json_with_fallback(
-        client,
-        model="primary",
-        fallback_model="backup",
-        system="s",
-        user="u",
-        max_tokens=10,
-        schema=_Sample,
-    )
-
-    assert result.name == "ok"
-    calls = client.chat.completions.create.call_args_list
-    assert calls[0].kwargs["model"] == "primary"
-    assert calls[1].kwargs["model"] == "backup"
-
-
-def test_call_json_with_fallback_disabled_reraises():
-    client = MagicMock()
-    client.chat.completions.create.side_effect = _rate_limit_error()
-
-    with pytest.raises(RateLimitExceeded):
-        call_json_with_fallback(
-            client,
-            model="primary",
-            fallback_model="",
-            system="s",
-            user="u",
-            max_tokens=10,
-            schema=_Sample,
-        )
-    # No fallback model configured: only the primary was ever tried.
-    assert client.chat.completions.create.call_count == 1
-
-
-def test_call_json_with_fallback_propagates_non_rate_limit_errors():
-    """A validation failure must not trigger a fallback retry — only 429s do."""
-    client = MagicMock()
-    client.chat.completions.create.return_value = _response("{not json")
-
-    with pytest.raises(LLMOutputError):
-        call_json_with_fallback(
-            client,
-            model="primary",
-            fallback_model="backup",
-            system="s",
-            user="u",
-            max_tokens=10,
-            schema=_Sample,
-        )
-    assert client.chat.completions.create.call_count == 1

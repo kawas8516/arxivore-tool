@@ -1,11 +1,15 @@
 from unittest.mock import MagicMock, patch
 from datetime import date, datetime, timezone
 
-from app.models import Paper
 from app.pipeline.retrieve import retrieve_candidates
 
 
-def _make_arxiv_result(arxiv_id: str, title: str, abstract: str):
+def _make_arxiv_result(
+    arxiv_id: str,
+    title: str = "Test Paper",
+    abstract: str = "Stuff.",
+    published: datetime = datetime(2024, 1, 15, tzinfo=timezone.utc),
+):
     result = MagicMock()
     result.entry_id = f"https://arxiv.org/abs/{arxiv_id}"
     result.title = title
@@ -15,7 +19,7 @@ def _make_arxiv_result(arxiv_id: str, title: str, abstract: str):
     author_a.name, author_b.name = "Alice", "Bob"
     result.authors = [author_a, author_b]
     result.categories = ["cs.LG"]
-    result.published = datetime(2024, 1, 15, tzinfo=timezone.utc)
+    result.published = published
     return result
 
 
@@ -48,3 +52,95 @@ def test_retrieve_empty_returns_empty_list(mock_client_cls):
 
     papers, _ = retrieve_candidates("some topic")
     assert papers == []
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_strips_version_suffix(mock_client_cls):
+    """v2 and v1 are the same paper; the canonical id must carry no suffix."""
+    mock_client = MagicMock()
+    mock_client.results.return_value = iter([_make_arxiv_result("2401.00001v3")])
+    mock_client_cls.return_value = mock_client
+
+    papers, _ = retrieve_candidates("test topic")
+
+    assert papers[0].arxiv_id == "2401.00001"
+    # The versioned form is still what links back to arXiv
+    assert papers[0].url == "https://arxiv.org/abs/2401.00001v3"
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_dedupes_across_queries_ignoring_version(mock_client_cls):
+    mock_client = MagicMock()
+    # Same paper from two queries, different revisions, plus one genuinely new
+    mock_client.results.side_effect = [
+        iter([_make_arxiv_result("2401.00001v1"), _make_arxiv_result("2401.00002")]),
+        iter([_make_arxiv_result("2401.00001v2"), _make_arxiv_result("2401.00003")]),
+    ]
+    mock_client_cls.return_value = mock_client
+
+    papers, _ = retrieve_candidates(["query one", "query two"])
+
+    ids = [p.arxiv_id for p in papers]
+    assert ids == ["2401.00001", "2401.00002", "2401.00003"]
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_survives_one_failing_query(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.results.side_effect = [
+        RuntimeError("arxiv 400"),
+        iter([_make_arxiv_result("2401.00002")]),
+    ]
+    mock_client_cls.return_value = mock_client
+
+    papers, _ = retrieve_candidates(["bad query", "good query"])
+
+    assert [p.arxiv_id for p in papers] == ["2401.00002"]
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_filters_out_papers_older_than_published_after(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.results.return_value = iter([
+        _make_arxiv_result("2401.00001", published=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+        _make_arxiv_result("2401.00002", published=datetime(2025, 6, 1, tzinfo=timezone.utc)),
+    ])
+    mock_client_cls.return_value = mock_client
+
+    papers, _ = retrieve_candidates("test topic", published_after=date(2024, 1, 1))
+
+    assert [p.arxiv_id for p in papers] == ["2401.00002"]
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_without_published_after_keeps_everything(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.results.return_value = iter([
+        _make_arxiv_result("2401.00001", published=datetime(2016, 1, 1, tzinfo=timezone.utc)),
+    ])
+    mock_client_cls.return_value = mock_client
+
+    papers, _ = retrieve_candidates("test topic")
+
+    assert [p.arxiv_id for p in papers] == ["2401.00001"]
+
+
+@patch("app.pipeline.retrieve.arxiv.Client")
+def test_retrieve_applies_category_filter(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.results.return_value = iter([])
+    mock_client_cls.return_value = mock_client
+
+    with patch("app.pipeline.retrieve.get_settings") as mock_settings:
+        settings = MagicMock()
+        settings.arxiv_page_size = 50
+        settings.max_candidates = 50
+        settings.arxiv_categories = "cs.LG,cs.CL"
+        mock_settings.return_value = settings
+
+        with patch("app.pipeline.retrieve.arxiv.Search") as mock_search:
+            retrieve_candidates("diffusion policy")
+            query = mock_search.call_args.kwargs["query"]
+
+    assert "cat:cs.LG OR cat:cs.CL" in query
+    assert "diffusion policy" in query

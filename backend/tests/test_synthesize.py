@@ -1,8 +1,21 @@
 import json
-from unittest.mock import patch
+import pytest
+from unittest.mock import MagicMock, patch
 
+import app.llm as llm
 from app.models import Author, Paper
+from app.pipeline._json import LLMOutputError
 from app.pipeline.synthesize import synthesize_landscape
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_cooldowns():
+    """app.llm parks rate-limited models in a module-global registry. Without a
+    reset, a test that exercises a 429 leaves its models cooling and the next
+    test silently takes a different failover path."""
+    llm._cooldowns.clear()
+    yield
+    llm._cooldowns.clear()
 
 
 def _make_paper(arxiv_id: str, status: str = "done") -> Paper:
@@ -21,6 +34,16 @@ def _make_paper(arxiv_id: str, status: str = "done") -> Paper:
         contribution="A contribution.",
         extract_status=status,
     )
+
+
+def _fake_response(data: dict) -> MagicMock:
+    message = MagicMock()
+    message.content = json.dumps(data)
+    choice = MagicMock()
+    choice.message = message
+    response = MagicMock()
+    response.choices = [choice]
+    return response
 
 
 _LANDSCAPE = {
@@ -49,12 +72,14 @@ _LANDSCAPE = {
 }
 
 
-@patch("app.pipeline.synthesize.complete")
-def test_synthesize_parses_landscape(mock_complete):
-    mock_complete.return_value = json.dumps(_LANDSCAPE)
+@patch("app.llm._get_client")
+def test_synthesize_parses_landscape(mock_get_client):
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_LANDSCAPE)
+    mock_get_client.return_value = mock_client
 
     papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
-    landscape, elapsed_ms = synthesize_landscape("retrieval", papers)
+    landscape, elapsed_ms, _, _ = synthesize_landscape("retrieval", papers)
 
     assert elapsed_ms >= 0
     assert len(landscape.clusters) == 2
@@ -66,9 +91,11 @@ def test_synthesize_parses_landscape(mock_complete):
     assert landscape.open_problems == _LANDSCAPE["open_problems"]
 
 
-@patch("app.pipeline.synthesize.complete")
-def test_synthesize_only_sends_extracted_papers(mock_complete):
-    mock_complete.return_value = json.dumps(_LANDSCAPE)
+@patch("app.llm._get_client")
+def test_synthesize_only_sends_extracted_papers(mock_get_client):
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(_LANDSCAPE)
+    mock_get_client.return_value = mock_client
 
     papers = [
         _make_paper("2401.0001", status="done"),
@@ -78,17 +105,71 @@ def test_synthesize_only_sends_extracted_papers(mock_complete):
     synthesize_landscape("retrieval", papers)
 
     # Inspect the payload actually sent to the LLM
-    messages = mock_complete.call_args.args[0]
-    user_content = messages[-1]["content"]
+    call = mock_client.chat.completions.create.call_args
+    user_content = call.kwargs["messages"][-1]["content"]
     assert "2401.0001" in user_content
     assert "2401.0003" in user_content
     assert "2401.0002" not in user_content
 
 
-@patch("app.pipeline.synthesize.complete")
-def test_synthesize_handles_markdown_fenced_json(mock_complete):
-    mock_complete.return_value = "```json\n" + json.dumps(_LANDSCAPE) + "\n```"
+@patch("app.llm._get_client")
+def test_synthesize_rejects_empty_landscape(mock_get_client):
+    """`{}` used to validate as a successful-but-blank landscape."""
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response({})
+    mock_get_client.return_value = mock_client
 
-    papers = [_make_paper("2401.0001")]
-    landscape, _ = synthesize_landscape("retrieval", papers)
+    with pytest.raises(LLMOutputError):
+        synthesize_landscape("retrieval", [_make_paper("2401.0001")])
+
+
+@patch("app.llm._get_client")
+def test_synthesize_prunes_hallucinated_ids_and_relationships(mock_get_client):
+    hallucinated = {
+        "clusters": [
+            {
+                "name": "Real Cluster",
+                "summary": "Grounded in the given papers.",
+                # 9999.9999 was never given to the model
+                "arxiv_ids": ["2401.0001", "9999.9999"],
+            }
+        ],
+        "relationships": [
+            {
+                "from_cluster": "Real Cluster",
+                "to_cluster": "Invented Cluster",  # not in clusters
+                "kind": "builds-on",
+                "description": "Dangling endpoint.",
+            }
+        ],
+        "tensions": [],
+        "open_problems": [],
+    }
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = _fake_response(hallucinated)
+    mock_get_client.return_value = mock_client
+
+    landscape, _, _, _ = synthesize_landscape("retrieval", [_make_paper("2401.0001")])
+
+    assert landscape.clusters[0].arxiv_ids == ["2401.0001"]
+    assert landscape.relationships == []
+
+
+@patch("app.llm._get_client")
+def test_synthesize_handles_markdown_fenced_json(mock_get_client):
+    mock_client = MagicMock()
+    fenced = MagicMock()
+    fenced.content = "```json\n" + json.dumps(_LANDSCAPE) + "\n```"
+    choice = MagicMock()
+    choice.message = fenced
+    response = MagicMock()
+    response.choices = [choice]
+    mock_client.chat.completions.create.return_value = response
+    mock_get_client.return_value = mock_client
+
+    # All three papers must be present: _LANDSCAPE references all three ids, and
+    # cross-reference pruning would otherwise strip the missing ones and empty a
+    # cluster, making this assertion about fence handling fail for the wrong reason.
+    papers = [_make_paper("2401.0001"), _make_paper("2401.0002"), _make_paper("2401.0003")]
+    landscape, _, _, _ = synthesize_landscape("retrieval", papers)
     assert len(landscape.clusters) == 2

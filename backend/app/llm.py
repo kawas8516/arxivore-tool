@@ -1,6 +1,7 @@
 """Single entry point for all LLM calls, with multi-model failover.
 
-Every pipeline stage (rerank, extract, synthesize) goes through `complete()`.
+Every pipeline stage (expand, rerank, extract, synthesize) goes through
+`call_json()`, which layers JSON mode and schema validation over `complete()`.
 It talks to OpenRouter (OpenAI-compatible) and gives us resilience against the
 free tier's per-model rate limits:
 
@@ -23,26 +24,26 @@ the account's allowed-models list).
 import logging
 import threading
 import time
+from typing import TypeVar
 
 import httpx
-from openai import APIStatusError, OpenAI, RateLimitError
+from openai import APIStatusError, BadRequestError, OpenAI, RateLimitError
+from pydantic import BaseModel
 
 from app.config import get_settings
+from app.pipeline._json import parse_model, strip_fences, usage_of
 
 logger = logging.getLogger(__name__)
+
+M = TypeVar("M", bound=BaseModel)
+
+# Ask the provider for JSON mode. Not every model on a routing provider honours
+# it, so this is an optimisation on top of parsing, never a substitute for it.
+_JSON_MODE = {"type": "json_object"}
 
 
 class AllModelsRateLimited(Exception):
     """Raised when every model in a pool is rate-limited / unavailable."""
-
-
-def strip_fences(raw: str) -> str:
-    """Remove a wrapping markdown code fence if the model added one."""
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        inner = [l for l in lines[1:] if l.strip() != "```"]
-        return "\n".join(inner).strip()
-    return raw
 
 
 # --- shared client (created once; reused across stages and threads) ----------
@@ -212,12 +213,20 @@ def resolve_pool(spec: str, kind: str) -> list[str]:
 
 
 # --- the one call everyone uses ----------------------------------------------
-def complete(messages: list[dict], *, pool: list[str], max_tokens: int) -> str:
+def complete(
+    messages: list[dict],
+    *,
+    pool: list[str],
+    max_tokens: int,
+    response_format: dict | None = None,
+) -> tuple[str, int, int]:
     """Run a chat completion against the pool, failing over on rate limits.
 
-    Returns the message content string. Raises ``AllModelsRateLimited`` when the
-    whole pool is unavailable, or the underlying error for non-rate-limit
-    failures.
+    Returns ``(content, prompt_tokens, completion_tokens)``. The token counts
+    feed `budget.add()`, so they travel with the content rather than being
+    re-derived by callers that no longer hold the response object. Raises
+    ``AllModelsRateLimited`` when the whole pool is unavailable, or the
+    underlying error for non-rate-limit failures.
     """
     if not pool:
         raise AllModelsRateLimited("model pool is empty")
@@ -229,6 +238,10 @@ def complete(messages: list[dict], *, pool: list[str], max_tokens: int) -> str:
     # pool anyway (cooldowns may have just lifted, or it's our only shot).
     available = [m for m in pool if not _is_cooling(m)] or list(pool)
 
+    kwargs = {}
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+
     try:
         # Native fallback: model=available[0] is primary, the rest are tried
         # in-order within this single request before any tokens are produced.
@@ -238,6 +251,7 @@ def complete(messages: list[dict], *, pool: list[str], max_tokens: int) -> str:
             max_tokens=max_tokens,
             messages=messages,
             extra_body={"models": available[:3]},
+            **kwargs,
         )
     except RateLimitError as exc:
         # OpenRouter exhausted the whole list and still hit a limit — park them.
@@ -264,4 +278,30 @@ def complete(messages: list[dict], *, pool: list[str], max_tokens: int) -> str:
         # run skip it directly rather than waiting for OpenRouter to reroute again.
         _cool([available[0]], settings.llm_cooldown_seconds)
         logger.info("failed over to model=%s; cooling primary=%s", used, available[0])
-    return content
+
+    prompt_tokens, completion_tokens = usage_of(response)
+    return strip_fences(content.strip()), prompt_tokens, completion_tokens
+
+
+def call_json(
+    messages: list[dict], *, pool: list[str], max_tokens: int, schema: type[M]
+) -> tuple[M, int, int]:
+    """Call the pool expecting JSON, and validate it against `schema`.
+
+    Returns ``(validated, prompt_tokens, completion_tokens)``. Raises
+    ``AllModelsRateLimited`` when the pool is exhausted, or ``LLMOutputError``
+    if the response is unparseable or off-schema.
+    """
+    try:
+        raw, prompt_tokens, completion_tokens = complete(
+            messages, pool=pool, max_tokens=max_tokens, response_format=_JSON_MODE
+        )
+    except BadRequestError:
+        # A model or route rejected response_format; parsing handles it anyway.
+        # Only a 400 falls through here — rate limits and auth errors propagate
+        # rather than burning a second call.
+        raw, prompt_tokens, completion_tokens = complete(
+            messages, pool=pool, max_tokens=max_tokens
+        )
+
+    return parse_model(raw, schema), prompt_tokens, completion_tokens

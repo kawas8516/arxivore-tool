@@ -13,41 +13,53 @@ class Settings(BaseSettings):
 
     llm_api_key: str
     llm_base_url: str = "https://openrouter.ai/api/v1"
-    # Legacy single-model vars — kept so older .env files still boot. Each is the
-    # position-0 default of the corresponding pool below.
-    llm_synthesis_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
-    llm_rerank_model: str = "meta-llama/llama-3.3-70b-instruct:free"
 
-    # Ordered failover pools (strongest-first). Comma-separated model ids, or the
-    # literal "auto" to discover free models from OpenRouter at runtime. Position 0
-    # is what runs on a healthy request, so accuracy is unchanged until a model is
-    # rate-limited and we descend the list. See app/llm.py.
+    # Ordered failover pools, strongest-first: comma-separated model ids, or the
+    # literal "auto" to discover free models from OpenRouter's catalog at
+    # runtime. Position 0 is what serves a healthy request, so accuracy is
+    # unchanged until a model is rate-limited and app/llm.py descends the list.
+    #
+    # Model IDs must exist in the provider catalog. A retired ID at position 0
+    # costs a failover rather than the stage, but verify against
+    # GET {llm_base_url}/models anyway (see tests/test_config.py).
     llm_synthesis_models: str = (
         "nvidia/nemotron-3-ultra-550b-a55b:free,"
         "nvidia/nemotron-3-super-120b-a12b:free,"
-        "nousresearch/hermes-3-llama-3.1-405b:free,"
-        "openai/gpt-oss-120b:free,"
-        "openrouter/owl-alpha"
+        "google/gemma-4-31b-it:free,"
+        "minimax/minimax-m3:free"
     )
     llm_rerank_models: str = (
-        "meta-llama/llama-3.3-70b-instruct:free,"
-        "openai/gpt-oss-120b:free,"
         "google/gemma-4-31b-it:free,"
-        "nvidia/nemotron-3-nano-30b-a3b:free,"
+        "nvidia/nemotron-3-super-120b-a12b:free,"
+        "google/gemma-4-26b-a4b-it:free,"
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     )
-    # When a model returns 429, skip it for this long (fallback if no Retry-After).
+    # When a model returns 429, skip it for this long (used when the upstream
+    # Retry-After header is absent), and how long the "auto" catalog is cached.
     llm_cooldown_seconds: int = 60
-    # How long to cache the discovered free-model catalog (auto mode).
     llm_models_cache_ttl: int = 3600
+
+    # Legacy single-model vars — kept so older .env files still boot. Each is the
+    # position-0 default of the corresponding pool above.
+    llm_synthesis_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
+    llm_rerank_model: str = "google/gemma-4-31b-it:free"
 
     max_candidates: int = 50
     max_retained_papers: int = 18
     max_concurrent_runs: int = 3
     daily_token_budget: int = 2_000_000
     rate_limit_per_minute: int = 10  # per-IP cap on /api/search
+    # Parallel extraction calls. Kept low because free-tier providers rate-limit
+    # aggressively — raising this into a 429 wall lowers completion, not latency.
+    extract_concurrency: int = 3
 
     arxiv_page_size: int = 50
+    # Number of arXiv queries to generate from one plain-English topic.
+    expand_queries: int = 5
+    # Optional arXiv category filter, comma-separated (e.g. "cs.LG,cs.CL").
+    # Empty means no filter — a narrow default would silently drop papers from
+    # adjacent categories (cs.RO, cs.CV, stat.ML).
+    arxiv_categories: str = ""
 
     backend_host: str = "127.0.0.1"
     backend_port: int = 8000

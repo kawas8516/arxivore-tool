@@ -6,19 +6,29 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app import storage
 from app.config import get_settings
 from app.api.search import router as search_router
+from app.api.runs import router as runs_router
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
-# CSP is intentionally permissive on script/style because the single-page UI uses
-# inline scripts, Alpine.js (needs 'unsafe-eval'), and the Tailwind Play CDN. It
-# still pins external loads to known CDNs and blocks framing/object embedding.
+# Alpine.js and the Tailwind Play script are vendored locally under
+# static/vendor/ (pinned exact versions, no CDN network dependency) — see
+# their <script> tags in index.html. Two directives still can't be tightened
+# further while using these tools as-is, vendored or not:
+#   - script-src 'unsafe-eval': Alpine evaluates x-data/x-show expressions via
+#     new Function() internally; this is architectural to Alpine, not an
+#     artifact of loading it from a CDN.
+#   - style-src 'unsafe-inline': Tailwind's Play script does client-side JIT
+#     compilation, injecting <style> tags at runtime; avoiding this needs a
+#     real build step, which would contradict this UI's "no Node build" design.
+# 'unsafe-inline' on script-src is gone: the page's JS is now the external
+# static/app.js, not an inline block.
 _CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
-    "https://cdn.tailwindcss.com https://unpkg.com; "
-    "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; "
+    "script-src 'self' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
     "connect-src 'self'; "
     "img-src 'self' data:; "
     "font-src 'self' data:; "
@@ -34,6 +44,7 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_settings()  # fail fast on startup if required env vars are missing
+    storage.init_db()
     yield
 
 
@@ -58,6 +69,7 @@ async def security_headers(request: Request, call_next):
 
 
 app.include_router(search_router, prefix="/api")
+app.include_router(runs_router, prefix="/api")
 
 # Serve the single-page UI at / (html=True serves index.html for the root).
 # Mounted last so it doesn't shadow /api routes.

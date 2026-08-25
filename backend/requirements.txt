@@ -1,9 +1,19 @@
-fastapi>=0.111.0
-uvicorn[standard]>=0.30.0
-arxiv>=2.1.3
-openai>=1.35.0
-pydantic>=2.7.0
-pydantic-settings>=2.3.0
+# Backend (FastAPI) dependencies. The Gradio Space uses the *root*
+# requirements.txt instead — these two are not interchangeable.
+#
+# Pinned to exact versions verified working against the current test suite.
+# Bump deliberately: `pip install -U <pkg>==<new>`, rerun `pytest`, then update
+# this pin. `pip-audit` flags known CVEs.
+fastapi==0.136.3
+uvicorn[standard]==0.40.0
+arxiv==4.0.1
+openai==2.14.0
+pydantic==2.12.4
+pydantic-settings==2.12.0
+# app/llm.py fetches OpenRouter's model catalog directly for "auto" pools.
+httpx==0.28.1
 
-# dev / test
-pytest>=8.0.0
+# dev / test / evals
+pytest==8.3.5
+pyyaml==6.0.2
+pip-audit==2.10.1
