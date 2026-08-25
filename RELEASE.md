@@ -128,6 +128,126 @@ reviewed the codebase against [`security.md`](security.md).
 
 ---
 
+# Multi-Model Failover & Extract Batching — v0.1.2
+
+Replaced the single-model LLM setup with a **hybrid failover pool system** and
+**batched extraction**, reducing rate-limit failures and cutting extract token
+usage by ~60%.
+
+## Problem
+
+Free-tier OpenRouter models have per-minute and daily rate limits. With a single
+model pinned per stage, any rate-limit hit returned a generic `502` and aborted
+the run. Extract called the LLM 18× (one paper per call), burning rate-limit
+quota fast and paying the system prompt cost 18 times.
+
+## What Shipped
+
+### `backend/app/llm.py` — new shared LLM module
+
+Single entry point for all LLM calls (previously each stage created its own
+`OpenAI` client). Key behaviours:
+
+- **One reused client** across all stages and threads — memory-optimal.
+- **Hybrid failover:** each request carries OpenRouter's native `models[]` array
+  (in-request fallback, no wasted output tokens if primary is rate-limited) **plus**
+  an in-process per-model cooldown registry so a rate-limited model is skipped on
+  subsequent calls without even attempting it.
+- **Auto-cool on silent fallback:** when OpenRouter's inner fallback serves a
+  response from a different model than requested, the primary is immediately cooled
+  — so the next call goes straight to the working model without waiting for
+  OpenRouter to re-route.
+- **`AllModelsRateLimited` exception** raised when every model in a pool is
+  unavailable, surfaced as HTTP `429` ("try again in a minute") at the API layer —
+  distinct from the per-IP `429` and generic `502`.
+- **`auto` discovery mode:** set `LLM_*_MODELS=auto` to fetch OpenRouter's free
+  model catalog at runtime (cached 1 h); your account's allowed-models list gates
+  which actually serve. True zero-touch when you add/remove models on OpenRouter.
+
+### Two ordered failover pools
+
+Models listed strongest-first. Position 0 is what runs on a healthy request —
+accuracy is unchanged until rate-limit pressure forces failover.
+
+| Pool | Models (in order) |
+|------|------------------|
+| Rerank + Extract | `meta-llama/llama-3.3-70b-instruct:free` → `openai/gpt-oss-120b:free` → `google/gemma-4-31b-it:free` → `nvidia/nemotron-3-nano-30b-a3b:free` → `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` |
+| Synthesis | `nvidia/nemotron-3-ultra-550b-a55b:free` → `nvidia/nemotron-3-super-120b-a12b:free` → `nousresearch/hermes-3-llama-3.1-405b:free` → `openai/gpt-oss-120b:free` → `openrouter/owl-alpha` |
+
+> All synthesis-pool models have ≥ 131K context — failover can never silently
+> truncate the synthesis prompt (18 extracted papers).
+
+> "Llama Nemotron Rerank VL 1B" (embedding-style reranker) was excluded — it is
+> not a chat/JSON-completion model and cannot serve these prompts.
+
+### Batched extraction (`backend/app/pipeline/extract.py`)
+
+| Before | After |
+|--------|-------|
+| 1 paper per LLM call | 4 papers per LLM call |
+| 18 calls per run | 5 calls per run |
+| `_MAX_WORKERS = 2` (9 serial rounds) | `_MAX_WORKERS = 3` (2 serial rounds) |
+| System prompt paid 18× | System prompt paid 5× |
+
+Token savings: ~2,600 input tokens per run on system prompts alone (~60%
+reduction on extract stage). Rate-limit pressure drops from 18 calls to 5
+calls per run.
+
+Batch failure isolation: if a batch fails (parse error or model error), the
+papers in that batch are marked `extract_status = "error"` and the rest
+continue — same per-paper resilience guarantee as before.
+
+### `.bat` launcher
+
+`start.bat` added to repo root — double-click to start the backend with one
+click (activates `.venv`, runs `uvicorn --reload`, keeps the window open on
+crash).
+
+### OpenRouter constraint discovered
+
+OpenRouter caps the native `models[]` fallback array at **3 models per
+request**. The pool can be longer (cooldown memory spans calls), but only the
+first 3 non-cooling models are sent per request.
+
+## Config Changes
+
+```env
+### New in .env / .env.example
+LLM_RERANK_MODELS=<comma-separated pool or "auto">
+LLM_SYNTHESIS_MODELS=<comma-separated pool or "auto">
+LLM_COOLDOWN_SECONDS=60
+LLM_MODELS_CACHE_TTL=3600
+```
+
+Legacy `LLM_RERANK_MODEL` / `LLM_SYNTHESIS_MODEL` (single-model vars) are kept
+as documented fallback defaults so existing `.env` files still boot.
+
+## Models Used
+
+| Role | Model |
+|------|-------|
+| Development | Claude Opus 4.8 / Sonnet 4.6 |
+| Rerank + Extract (primary) | `meta-llama/llama-3.3-70b-instruct:free` |
+| Rerank + Extract (failover) | `openai/gpt-oss-120b:free` (auto-triggered on rate limit) |
+| Synthesis | `nvidia/nemotron-3-ultra-550b-a55b:free` |
+
+## Tests Run
+
+- **20 unit tests — 20 passed.**
+- 9 new tests added: failover, cooldown, all-exhausted, auto-discovery (2 pool
+  variants), OpenRouter silent-fallback cooling, per-stage mock repointing.
+- **Live end-to-end** (first run with failover active):
+
+  | Topic | Retrieved | Ranked | Extracted | Result |
+  |-------|----------:|-------:|----------:|--------|
+  | retrieval-augmented generation | 50 | 18 | 18/18 ✓ | synthesized |
+
+  Failover triggered on nearly every extract call (llama rate-limited); gpt-oss-120b
+  served all 18 papers. Extract time: ~105 s (pre-batching). With batching and
+  auto-cooling: expected ~2–3× improvement on next run.
+
+---
+
 # Correctness & Instrumentation Build — v0.2.0
 
 Audit-driven batch. Full findings list in [`IMPROVEMENT_PLAN.md`](IMPROVEMENT_PLAN.md)
@@ -324,3 +444,152 @@ any search) since `result` starts `null`. One-token fix:
   neither would show up in `curl -I` status-code checks or in a diff review.
 - Vendor assets and `app.js` confirmed serving `200` from the local static
   mount (not a CDN redirect) via direct request.
+
+---
+
+# Branch Alignment & Production Hardening — v0.5.0
+
+The two branches had drifted apart, and the live Space had been quietly broken
+for months. This build fixes both, and settles what each branch is *for*.
+
+## Branch roles, finally explicit
+
+| Branch | Purpose |
+|---|---|
+| `main` | the full backend — run locally, deploy to GCP/AWS. FastAPI + OpenRouter, SQLite persistence, SSE progress, embedding prefilter and full-text extraction |
+| `hf-spaces-prototype` | the free-tier Gradio demo at [`kawas8516/arxivore`](https://huggingface.co/spaces/kawas8516/arxivore) — same four-stage pipeline, sized for a public CPU Space and for recruiters to click |
+
+They share the pipeline and the LLM transport. They differ only where the
+deployment target genuinely differs. Before this build they differed everywhere,
+by accident.
+
+## 1 · The Space was broken, and nothing said so
+
+`microsoft/Phi-4-mini-instruct` had been the Space's model since it was written.
+It was never served by any provider — and the `-mini-instruct` variant does not
+exist at all (plain `microsoft/phi-4` does).
+
+The Space **built green and ran green**. Retrieve worked. Rerank worked, because
+it is a local CPU cross-encoder that never calls an API. Extract and Synthesize
+failed on every single call, and the only symptom was two empty tabs.
+
+Now `google/gemma-3-12b-it`: served, returns valid JSON, small enough to stay
+cheap on free-tier credits.
+
+## 2 · A withdrawn model id killed the backend too
+
+Five of nine configured OpenRouter ids had been withdrawn from the catalog,
+including **position 0 of the rerank pool** — the model every healthy request
+hit first.
+
+The failover pools did not help, because an unknown id returns **400, not 429**,
+and `complete()` only descended the pool on a rate limit or a 5xx. `app/llm.py`
+now fails over on an unservable id too, dropping only the ids the provider names
+and parking them for the catalog TTL rather than the 60-second rate-limit
+cooldown — a retired model is not coming back in a minute.
+
+## 3 · So model ids are now checked, not assumed
+
+`scripts/check_models.py` validates every id the project can dial, against the
+right provider, and exits non-zero so it can gate a release.
+
+```bash
+python scripts/check_models.py            # both providers
+python scripts/check_models.py --suggest  # live replacements for anything dead
+```
+
+The HF check **calls** the model rather than looking it up: catalog membership
+is not the property that matters, being servable *for this account* is — and
+that is precisely the distinction Phi-4-mini fell through.
+
+## 4 · HF force-upgraded the Space SDK mid-flight
+
+Hugging Face bumped the Space from Gradio 5.9.1 to 6.26.0 on its own. Gradio 6
+moved `theme` off the `Blocks` constructor onto `launch()`, and signals removed
+arguments with a **UserWarning, not an error** — so the Space kept serving while
+silently dropping its theme and rendering unstyled.
+
+Fixed, then pinned: `gradio==6.26.0` exactly, and `app.py` now checks the Gradio
+major it actually loaded, logging ERROR *and* rendering a banner into the page
+header on a mismatch. A Space log nobody opens is how this got missed once.
+
+## 5 · One LLM transport, on both branches
+
+Both branches had independently grown failover. `main` retried once against a
+single `LLM_FALLBACK_MODEL`; the prototype had ordered pools with cooldowns and
+runtime catalog discovery. The pools won.
+
+`app/llm.py` is now the only thing that issues an LLM request. `_json.py` keeps
+parsing, validation, and token accounting, and imports nothing from `app` — which
+is what lets `app.llm` build on it without a cycle. `complete()` returns
+`(content, prompt_tokens, completion_tokens)`, because `budget.add()` cannot
+count what a bare `str` return threw away.
+
+## 6 · Repo layout now mirrors the Space
+
+`hf_space/` was promoted to the repo root as pure renames, so the branch and the
+Space repo can be diffed with `git cat-file -s` instead of the HF API. All nine
+code files are byte-identical to what is deployed.
+
+> **Watch the line endings.** This repo runs `core.autocrlf=true`, so working-tree
+> files are CRLF while the committed blobs are LF. Copying a worktree file into
+> the Space pushes CRLF and silently breaks the mirror. Stage from the blob
+> (`git show HEAD:<path>`), never from the checkout.
+
+## What each branch kept
+
+Left off the Space branch, deliberately — a PDF fetch per paper and an extra
+embedding call per run do not suit a free-tier demo:
+
+| Not on the Space branch | Why |
+|---|---|
+| `pipeline/embed.py` | OpenRouter's `/embeddings` coverage is thin; costs a call per run |
+| `pipeline/fulltext.py` | a PDF fetch and parse per paper, plus a `pypdf` dependency |
+
+Both are default-off on `main`, so excluding them changes no behavior. Bringing
+`main` to parity therefore had to *re-apply* their wiring on top of the new
+transport rather than merge over it.
+
+## Models
+
+| Where | Stage | Model |
+|---|---|---|
+| Backend | synthesize | `nemotron-3-ultra-550b-a55b:free` → 3 more in pool |
+| Backend | rerank · extract · expand | `gemma-4-31b-it:free` → 3 more in pool |
+| Space | extract · synthesize | `google/gemma-3-12b-it` (HF Inference API) |
+| Space | rerank | `BAAI/bge-reranker-v2-m3` (local CPU, no API, no quota) |
+
+Either backend pool also accepts the literal `auto`, which discovers free models
+from OpenRouter's catalog at runtime.
+
+## Tests
+
+**138 passing, 1 skipped** on `main`; **127 passing** on `hf-spaces-prototype`.
+The suite runs identically from the repo root and from `backend/` — that
+dual-cwd behaviour is what root-level `pytest.ini` exists for.
+
+| Area | Coverage |
+|---|---|
+| `test_llm.py` (16) | pool failover, cooldown registry, all-exhausted, auto-discovery, OpenRouter silent-fallback cooling, JSON mode, the 400-only retry without `response_format`, schema rejection, and failover past a withdrawn id |
+| `test_config.py` | asserts on **shipped defaults**, not `get_settings()` — reading loaded config is how a developer's own `.env` masked retired ids from everyone else |
+| `test_rerank.py` (11) | batching at 15/group, partial-batch failure, all-batches-fail raising, token accounting, pool failover |
+| `test_extract.py` (12) | per-paper resilience, extraction cache hits, storage write-through and its failure path |
+| `test_service.py` | full pipeline orchestration; its three per-module mocks collapsed into one client dispatching on the system prompt, since the stages no longer have separate clients to mock apart |
+| `test_embed.py` · `test_fulltext.py` | `main` only — the opt-in features the Space branch does not carry |
+
+Two opt-in network checks, excluded by default:
+
+```bash
+pytest -m live_models
+```
+
+They verify every configured OpenRouter id against the live catalog *and* call
+the Space's HF model, rejecting empty content — thinking models return `None`
+and would break the JSON-only extraction prompt. On `main` the Space tests skip
+themselves, because `main` ships no Gradio app and "no HF models here" is the
+correct answer rather than a failure.
+
+**Verified end to end** against the live HF API through the Space's own code
+path: 2/2 papers extracted in 4.2 s, synthesis returned 2 clusters,
+2 relationships, 1 tension, 3 open problems. The Space is `RUNNING` on
+Gradio 6.26.0 / Python 3.11.
