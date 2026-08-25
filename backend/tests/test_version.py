@@ -25,7 +25,7 @@ _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def _release_versions() -> list[str]:
-    """Every version RELEASE.md declares, in document order."""
+    """Every version RELEASE.md declares, in document order (newest first)."""
     text = (_REPO_ROOT / "RELEASE.md").read_text(encoding="utf-8")
     return re.findall(r"^#+ .*?v(\d+\.\d+\.\d+)\s*$", text, re.M)
 
@@ -43,14 +43,19 @@ def test_release_notes_document_the_current_version():
     """A release without notes is a release nobody can read."""
     versions = _release_versions()
     assert versions, "no version headings found in RELEASE.md"
+    newest = max(versions, key=lambda v: tuple(int(p) for p in v.split(".")))
     assert __version__ in versions, (
         f"app.__version__ is {__version__} but RELEASE.md has no heading for it. "
-        f"Newest documented: {versions[-1]}. Add the section, or fix the constant."
+        f"Newest documented: {newest}. Add the section, or fix the constant."
     )
 
 
 def test_current_version_is_the_newest_in_release_notes():
-    """Guards the other direction: notes written for a version never shipped."""
+    """Guards the other direction: notes written for a version never shipped.
+
+    Uses max() rather than the first entry, so this stays correct regardless of
+    how the file is ordered.
+    """
     versions = _release_versions()
     newest = max(versions, key=lambda v: tuple(int(p) for p in v.split(".")))
     assert __version__ == newest, (
@@ -59,11 +64,15 @@ def test_current_version_is_the_newest_in_release_notes():
     )
 
 
-def test_release_notes_versions_only_increase():
-    """Document order must match version order, so the file reads chronologically."""
+def test_release_notes_are_newest_first():
+    """Newest release at the top, descending — what a reader wants first.
+
+    Guards the ordering itself, so a section appended to the bottom out of habit
+    fails here instead of quietly burying the latest release under the history.
+    """
     versions = [tuple(int(p) for p in v.split(".")) for v in _release_versions()]
-    assert versions == sorted(versions), (
-        "RELEASE.md sections are out of version order: "
+    assert versions == sorted(versions, reverse=True), (
+        "RELEASE.md sections are out of order (expected newest first): "
         + " -> ".join(".".join(map(str, v)) for v in versions)
     )
 
