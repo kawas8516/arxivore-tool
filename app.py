@@ -141,7 +141,7 @@ def _build_landscape_md(topic: str, landscape) -> str:
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="Arxivore", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Arxivore") as demo:
     gr.Markdown(_HEADER)
 
     with gr.Tabs():
@@ -185,4 +185,7 @@ with gr.Blocks(title="Arxivore", theme=gr.themes.Soft()) as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    # theme moved from the Blocks constructor to launch() in Gradio 6.0; passing
+    # it to Blocks is only a UserWarning, so the Space would have rendered
+    # unthemed without anyone noticing.
+    demo.launch(theme=gr.themes.Soft())
