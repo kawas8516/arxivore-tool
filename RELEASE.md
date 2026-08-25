@@ -593,3 +593,47 @@ correct answer rather than a failure.
 path: 2/2 papers extracted in 4.2 s, synthesis returned 2 clusters,
 2 relationships, 1 tension, 3 open problems. The Space is `RUNNING` on
 Gradio 6.26.0 / Python 3.11.
+
+---
+
+# Version Consistency — v0.5.1
+
+`backend/app/main.py` declared `FastAPI(version="0.1.0")` and never moved. Four
+releases shipped past it, so `/openapi.json` and `/docs` told every reader — and
+every generated client — that this was still the first build.
+
+Nobody noticed because nothing checked. That is the actual defect; the stale
+string was only its symptom.
+
+## Fixed
+
+- `app.__version__` in `backend/app/__init__.py` is now the single source of
+  truth, and `main.py` reads it instead of restating it.
+- `tests/test_version.py` enforces agreement between the constant, RELEASE.md,
+  and the git tag, so the number can only be wrong in one place at a time.
+
+## Releasing from here
+
+1. Bump `app.__version__`
+2. Add the matching `# ... — vX.Y.Z` heading to this file
+3. Tag
+
+The suite fails until steps 1 and 2 agree, which is what stops step 3 from
+shipping another lie.
+
+## Tests
+
+**143 passing, 1 skipped** on `main`. Six new checks:
+
+| Check | Catches |
+|---|---|
+| valid semver | a malformed constant |
+| `app.version == __version__` | **the regression this file exists for** — `/docs` lying about the version |
+| current version is documented | a release with no notes |
+| current version is the *newest* section | notes written for a version never shipped |
+| sections only increase | RELEASE.md drifting out of chronological order |
+| git tag matches the constant | a tag disagreeing with the code it points at |
+
+The tag check is marked `live_models` because it shells out to `git` and needs
+tags present — a shallow CI clone has none, and that should not fail the default
+suite. It skips when HEAD is untagged.
