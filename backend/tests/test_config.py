@@ -13,7 +13,9 @@ Run it with:  pytest -m live_models
 """
 
 import os
+import re
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -98,3 +100,47 @@ def test_configured_models_exist_in_provider_catalog():
     )
     missing = sorted(configured - catalog)
     assert not missing, f"not in the provider catalog: {', '.join(missing)}"
+
+
+# --- the Space's models (HF Inference API), not the backend's ---------------
+#
+# These live here because nothing else covered them, and that gap is exactly how
+# `microsoft/Phi-4-mini-instruct` shipped: it was never served by any provider,
+# the Space built and ran green, and extract/synthesize failed on every call
+# with only empty Papers/Landscape tabs to show for it.
+#
+# The Space's llm.py is read as text rather than imported: it sits at the repo
+# root and would shadow backend/app/llm.py on sys.path.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _space_chat_model() -> str:
+    src = (_REPO_ROOT / "llm.py").read_text(encoding="utf-8")
+    m = re.search(r'_MODEL = "([^"]+)"', src)
+    assert m, "could not find _MODEL in the Space's llm.py"
+    return m.group(1)
+
+
+def test_space_model_is_not_a_known_dead_id():
+    """Offline guard: these were configured and never served."""
+    assert _space_chat_model() not in {
+        "microsoft/Phi-4-mini-instruct",  # no provider hosts it; variant does not exist
+    }
+
+
+@pytest.mark.live_models
+def test_space_chat_model_is_actually_callable():
+    """Catalog presence is not enough — the model must be servable for this account."""
+    from huggingface_hub import InferenceClient
+
+    model = _space_chat_model()
+    client = InferenceClient()
+    response = client.chat_completion(
+        messages=[{"role": "user", "content": "ping"}], model=model, max_tokens=5
+    )
+    content = response.choices[0].message.content
+    assert content is not None, (
+        f"{model} returned empty content — thinking models do this and break "
+        "the JSON-only extraction prompt"
+    )

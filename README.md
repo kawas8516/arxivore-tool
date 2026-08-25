@@ -260,6 +260,35 @@ how they relate.
 | `GET` | `/api/runs` | All prior runs (reading map) |
 | `PATCH` | `/api/papers/{id}` | Update read / to-read status |
 
+## Keeping model IDs alive
+
+Model IDs get withdrawn, and both of this project's LLM surfaces fail *quietly*
+when that happens:
+
+- **OpenRouter** (backend) returns **400, not 429**, for an unknown id — so the
+  failover pools do not rescue it and the stage dies outright.
+- **HF Inference API** (the Space) answers `model_not_supported`. The Space still
+  builds and runs green; the only symptom is empty Papers and Landscape tabs.
+
+One command checks every configured id against both providers:
+
+```bash
+python scripts/check_models.py            # both
+python scripts/check_models.py --hf       # the Space's models only
+python scripts/check_models.py --suggest  # list live replacements for dead ids
+```
+
+It exits non-zero if anything is unavailable, so it can gate a release. The HF
+check *calls* the model rather than just looking it up — catalog presence does
+not mean a provider will serve it for your account, which is precisely how
+`microsoft/Phi-4-mini-instruct` shipped broken.
+
+The same checks run in the suite under an opt-in marker:
+
+```bash
+pytest -m live_models
+```
+
 ## Security notes
 
 - The LLM API key lives **only** on the backend. Never set `NEXT_PUBLIC_LLM_API_KEY`.
