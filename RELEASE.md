@@ -1,29 +1,7 @@
 # Release Notes — Arxivore
 
 Build-by-build record of what shipped, the security lapses found and fixed, the
-models used, the tests run, and the Claude tokens spent building it.
-
-## Claude Build Token Usage
-
-Tokens consumed by **Claude Code** (the AI pair-programmer) to build the product,
-covering both builds combined (the `/cost` report is a cumulative session total
-and can't be cleanly split per build).
-
-| Claude model | Input | Output | Cache read | Cache write | Cost |
-|--------------|------:|-------:|-----------:|------------:|-----:|
-| Opus 4.8 | 21.4k | 101.5k | 10.8M | 357.7k | $11.62 |
-| Sonnet 4.6 | 1.2k | 56.7k | 12.0M | 462.1k | $7.23 |
-| Haiku 4.5 | 46 | 1.6k | 395.0k | 98.4k | $0.24 |
-| **Total** | **22.6k** | **159.8k** | **23.2M** | **918.2k** | **$19.09** |
-
-**Session at a glance:**
-
-- **Total cost:** $19.09
-- **API time:** 3h 28m 48s · **wall time:** ~1d 7h
-- **Code changes:** 2,895 lines added · 229 removed
-- **Models used:** Opus 4.8 (primary), Sonnet 4.6, Haiku 4.5
-
----
+models used, and the tests run.
 
 # Initial Build — v0.1.0 (M1–M3)
 
