@@ -239,3 +239,62 @@ def test_call_json_does_not_retry_a_rate_limit_as_a_400():
                 [{"role": "user", "content": "hi"}], pool=["a"], max_tokens=10, schema=_Sample
             )
     assert client.chat.completions.create.call_count == 1
+
+
+# --- withdrawn model ids: 400/404, not 429 ----------------------------------
+
+
+def _status_error(status: int, message: str) -> openai.APIStatusError:
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(status, request=request, json={"error": {"message": message}})
+    return openai.APIStatusError(message, response=response, body=None)
+
+
+def test_complete_fails_over_past_a_withdrawn_model_id():
+    """Regression: a retired id returns 400, so rate-limit failover never saw it
+    and the whole stage died on a config that worked last month."""
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [
+        _status_error(400, "dead/model:free is not a valid model ID"),
+        _ok_response("recovered", model="live/model:free"),
+    ]
+    with patch("app.llm._get_client", return_value=client):
+        out, _, _ = complete(
+            [{"role": "user", "content": "hi"}],
+            pool=["dead/model:free", "live/model:free"],
+            max_tokens=10,
+        )
+
+    assert out == "recovered"
+    # Only the id the provider named is dropped; the survivor is tried next.
+    assert client.chat.completions.create.call_args_list[1].kwargs["model"] == "live/model:free"
+    assert llm._is_cooling("dead/model:free")
+    assert not llm._is_cooling("live/model:free")
+
+
+def test_complete_raises_when_every_model_id_is_unservable():
+    client = MagicMock()
+    client.chat.completions.create.side_effect = _status_error(
+        404, "No endpoints found for the requested model"
+    )
+    with patch("app.llm._get_client", return_value=client):
+        with pytest.raises(AllModelsRateLimited):
+            complete(
+                [{"role": "user", "content": "hi"}], pool=["a", "b"], max_tokens=10
+            )
+    # Unnamed models drop one per pass, so the loop terminates instead of spinning.
+    assert client.chat.completions.create.call_count == 2
+
+
+def test_complete_does_not_treat_a_plain_400_as_a_dead_model():
+    """A route rejecting response_format is a request problem, not a model one —
+    call_json's no-JSON-mode retry depends on that error reaching it intact."""
+    client = MagicMock()
+    client.chat.completions.create.side_effect = _status_error(
+        400, "response_format is not supported by this provider"
+    )
+    with patch("app.llm._get_client", return_value=client):
+        with pytest.raises(openai.APIStatusError):
+            complete([{"role": "user", "content": "hi"}], pool=["a", "b"], max_tokens=10)
+    assert client.chat.completions.create.call_count == 1
+    assert not llm._is_cooling("a")

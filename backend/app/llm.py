@@ -88,6 +88,29 @@ def _cool(models: list[str], seconds: float) -> None:
             _cooldowns[m] = until
 
 
+# A model that has been withdrawn from the catalog comes back 400/404, not 429,
+# so rate-limit failover never saw it and the whole stage died on a config that
+# was fine last month. These are the shapes OpenRouter uses to say "that id is
+# not servable" — matched on the message because the status code alone cannot
+# distinguish them from a genuinely malformed request.
+_UNKNOWN_MODEL_HINTS = (
+    "not a valid model",
+    "no endpoints found",
+    "no allowed providers",
+    "unknown model",
+    "model not found",
+    "does not exist",
+)
+
+
+def _is_unknown_model_error(exc: APIStatusError) -> bool:
+    """True when the provider is rejecting the model id itself, not the request."""
+    if exc.status_code not in (400, 403, 404):
+        return False
+    message = str(getattr(exc, "message", "") or exc)
+    return any(hint in message.lower() for hint in _UNKNOWN_MODEL_HINTS)
+
+
 def _retry_after_seconds(exc: RateLimitError, default: float) -> float:
     """Best-effort parse of the Retry-After header; fall back to the default."""
     try:
@@ -227,6 +250,10 @@ def complete(
     re-derived by callers that no longer hold the response object. Raises
     ``AllModelsRateLimited`` when the whole pool is unavailable, or the
     underlying error for non-rate-limit failures.
+
+    Two things descend the pool: a rate limit, and a model id the provider will
+    not serve at all. The second matters because model ids get withdrawn — the
+    stage should lose one pool entry, not fail outright.
     """
     if not pool:
         raise AllModelsRateLimited("model pool is empty")
@@ -242,31 +269,56 @@ def complete(
     if response_format is not None:
         kwargs["response_format"] = response_format
 
-    try:
-        # Native fallback: model=available[0] is primary, the rest are tried
-        # in-order within this single request before any tokens are produced.
-        # OpenRouter caps the fallback array at 3 models per request.
-        response = client.chat.completions.create(
-            model=available[0],
-            max_tokens=max_tokens,
-            messages=messages,
-            extra_body={"models": available[:3]},
-            **kwargs,
-        )
-    except RateLimitError as exc:
-        # OpenRouter exhausted the whole list and still hit a limit — park them.
-        cooldown = _retry_after_seconds(exc, settings.llm_cooldown_seconds)
-        _cool(available, cooldown)
-        logger.warning(
-            "all %d models rate-limited; cooling for %.0fs", len(available), cooldown
-        )
-        raise AllModelsRateLimited(
-            f"all {len(available)} models rate-limited"
-        ) from exc
-    except APIStatusError as exc:
-        if exc.status_code and 500 <= exc.status_code < 600:
-            raise AllModelsRateLimited("upstream model error") from exc
-        raise
+    response = None
+    while response is None:
+        try:
+            # Native fallback: model=available[0] is primary, the rest are tried
+            # in-order within this single request before any tokens are produced.
+            # OpenRouter caps the fallback array at 3 models per request.
+            response = client.chat.completions.create(
+                model=available[0],
+                max_tokens=max_tokens,
+                messages=messages,
+                extra_body={"models": available[:3]},
+                **kwargs,
+            )
+        except RateLimitError as exc:
+            # OpenRouter exhausted the whole list and still hit a limit — park them.
+            cooldown = _retry_after_seconds(exc, settings.llm_cooldown_seconds)
+            _cool(available, cooldown)
+            logger.warning(
+                "all %d models rate-limited; cooling for %.0fs", len(available), cooldown
+            )
+            raise AllModelsRateLimited(
+                f"all {len(available)} models rate-limited"
+            ) from exc
+        except APIStatusError as exc:
+            if exc.status_code and 500 <= exc.status_code < 600:
+                raise AllModelsRateLimited("upstream model error") from exc
+            if not _is_unknown_model_error(exc):
+                raise
+            # The id is not servable — a withdrawn model, or one this account is
+            # not allowed. Retrying it costs a round-trip on every call for the
+            # rest of the process, so park it and retry with what is left.
+            #
+            # Drop only the ids the error actually names; the request carries up
+            # to 3 models and discarding all of them would throw away working
+            # ones. When the message names none, drop the primary — that still
+            # shortens the list every pass, so the loop terminates.
+            message = str(getattr(exc, "message", "") or exc)
+            rejected = [m for m in available[:3] if m in message] or available[:1]
+            _cool(rejected, settings.llm_models_cache_ttl)
+            available = [m for m in available if m not in rejected]
+            logger.warning(
+                "model(s) %s rejected as unservable (%s); %d left in pool",
+                ", ".join(rejected),
+                exc.status_code,
+                len(available),
+            )
+            if not available:
+                raise AllModelsRateLimited(
+                    "no servable model left in pool — every id was rejected"
+                ) from exc
 
     content = response.choices[0].message.content if response.choices else None
     if not content:
