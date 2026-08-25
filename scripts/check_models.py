@@ -98,14 +98,23 @@ def openrouter_configured() -> dict[str, list[str]]:
 
 
 def hf_configured() -> dict[str, str]:
-    """The Space's models: the chat model in llm.py and the local cross-encoder."""
+    """The Space's models: the chat model in llm.py and the local cross-encoder.
+
+    Returns empty on a branch without the Space files. `main` is the deployable
+    backend and carries no Gradio app, so "no HF models here" is the correct
+    answer there, not a failure.
+    """
     out = {}
-    m = re.search(r'_MODEL = "([^"]+)"', (_ROOT / "llm.py").read_text(encoding="utf-8"))
-    if m:
-        out["llm.py::_MODEL"] = m.group(1)
-    m = re.search(r'CrossEncoder\("([^"]+)"\)', (_ROOT / "pipeline" / "rerank.py").read_text(encoding="utf-8"))
-    if m:
-        out["pipeline/rerank.py::_RERANKER"] = m.group(1)
+    llm_py = _ROOT / "llm.py"
+    if llm_py.exists():
+        m = re.search(r'_MODEL = "([^"]+)"', llm_py.read_text(encoding="utf-8"))
+        if m:
+            out["llm.py::_MODEL"] = m.group(1)
+    rerank_py = _ROOT / "pipeline" / "rerank.py"
+    if rerank_py.exists():
+        m = re.search(r'CrossEncoder\("([^"]+)"\)', rerank_py.read_text(encoding="utf-8"))
+        if m:
+            out["pipeline/rerank.py::_RERANKER"] = m.group(1)
     return out
 
 
@@ -193,6 +202,11 @@ def _openrouter_free_chat(data) -> list[tuple[str, int]]:
 def check_hf(suggest: bool) -> int:
     print("== Hugging Face (Gradio Space) " + "=" * 41)
     configured = hf_configured()
+    if not configured:
+        print("  no Space files on this branch (no root llm.py / pipeline/) — skipping.")
+        print("  This is expected on `main`; the Gradio Space lives on hf-spaces-prototype.")
+        return 0
+
     token = _hf_token()
     print(f"  token: {'found' if token else 'NONE — using anonymous access'}\n")
 

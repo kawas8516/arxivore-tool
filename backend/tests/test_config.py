@@ -115,13 +115,22 @@ def test_configured_models_exist_in_provider_catalog():
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+_SPACE_LLM = _REPO_ROOT / "llm.py"
+
+# `main` is the deployable backend and ships no Gradio app, so these skip there
+# rather than fail. They run on hf-spaces-prototype, where the Space lives.
+_needs_space = pytest.mark.skipif(
+    not _SPACE_LLM.exists(), reason="no Gradio Space on this branch (no root llm.py)"
+)
+
+
 def _space_chat_model() -> str:
-    src = (_REPO_ROOT / "llm.py").read_text(encoding="utf-8")
-    m = re.search(r'_MODEL = "([^"]+)"', src)
+    m = re.search(r'_MODEL = "([^"]+)"', _SPACE_LLM.read_text(encoding="utf-8"))
     assert m, "could not find _MODEL in the Space's llm.py"
     return m.group(1)
 
 
+@_needs_space
 def test_space_model_is_not_a_known_dead_id():
     """Offline guard: these were configured and never served."""
     assert _space_chat_model() not in {
@@ -129,6 +138,7 @@ def test_space_model_is_not_a_known_dead_id():
     }
 
 
+@_needs_space
 @pytest.mark.live_models
 def test_space_chat_model_is_actually_callable():
     """Catalog presence is not enough — the model must be servable for this account."""

@@ -447,82 +447,149 @@ any search) since `result` starts `null`. One-token fix:
 
 ---
 
-# Branch Convergence — v0.5.0
+# Branch Alignment & Production Hardening — v0.5.0
 
-The `hf-spaces-prototype` branch had drifted from `main` in both directions:
-behind on 13 commits of backend work, ahead on LLM failover. This build makes
-the branch a superset rather than a fork, and makes it mirror the live Space.
+The two branches had drifted apart, and the live Space had been quietly broken
+for months. This build fixes both, and settles what each branch is *for*.
 
-## The layout problem this opened with
+## Branch roles, finally explicit
 
-The Space at [`kawas8516/arxivore`](https://huggingface.co/spaces/kawas8516/arxivore)
-is its own git repo with a flat root, pushed by hand. This branch kept the same
-nine files under `hf_space/`. Content agreed byte-for-byte; the *shape* did not,
-so nothing could be diffed without going through the HF API.
-
-Fixed by promoting `hf_space/` to the repo root as pure renames. The nine blob
-sizes are recorded in `HF_SPACES_PROTOTYPE.md` so the mirror is now checkable
-with `git cat-file -s`. `README.md` carries the Space card as YAML frontmatter
-above the project README — the one file that intentionally differs.
-
-## Two failover designs, one kept
-
-`main` retried once against a single `LLM_FALLBACK_MODEL`. This branch had
-ordered pools with per-model cooldowns, OpenRouter's native `models[]` array,
-and runtime catalog discovery. The pools won; `_json.py` was cut back to parsing
-and accounting, and `app/llm.py` became the only transport.
-
-`complete()` had to start returning token usage — `budget.add()` cannot count
-what a `str` return threw away.
-
-## A live breakage found on the way
-
-5 of the 9 default model IDs no longer existed in the OpenRouter catalog,
-including **position 0 of the rerank pool**:
-
-| Retired ID | Was |
+| Branch | Purpose |
 |---|---|
-| `meta-llama/llama-3.3-70b-instruct:free` | rerank position 0 |
-| `openai/gpt-oss-120b:free` | rerank + synthesis failover |
-| `nvidia/nemotron-3-nano-30b-a3b:free` | rerank pool |
-| `nousresearch/hermes-3-llama-3.1-405b:free` | synthesis pool |
-| `openrouter/owl-alpha` | synthesis pool |
+| `main` | the full backend — run locally, deploy to GCP/AWS. FastAPI + OpenRouter, SQLite persistence, SSE progress, embedding prefilter and full-text extraction |
+| `hf-spaces-prototype` | the free-tier Gradio demo at [`kawas8516/arxivore`](https://huggingface.co/spaces/kawas8516/arxivore) — same four-stage pipeline, sized for a public CPU Space and for recruiters to click |
 
-Failover does not cover this: an unknown model id returns **400, not 429**, and
-`complete()` only descends the pool on a rate limit or a 5xx. A fresh clone was
-broken at rerank, extract, and expand.
+They share the pipeline and the LLM transport. They differ only where the
+deployment target genuinely differs. Before this build they differed everywhere,
+by accident.
 
-Defaults now point at IDs verified against the live catalog. `test_config` was
-also rewritten to assert on `Settings.model_fields[...].default` rather than
-`get_settings()` — reading the loaded config meant a developer's own `.env`
-could mask a retired default from everyone else, which is exactly what had
-happened.
+## 1 · The Space was broken, and nothing said so
 
-## Ported from main
+`microsoft/Phi-4-mini-instruct` had been the Space's model since it was written.
+It was never served by any provider — and the `-mini-instruct` variant does not
+exist at all (plain `microsoft/phi-4` does).
 
-Batched rerank (15/group), `budget.py` spend ceiling, `storage.py` SQLite
-persistence + extraction cache, async pipeline with SSE progress, `api/runs.py`
-reading map, repaired static UI, `pipeline/expand.py`, the eval harness, and
-`pytest.ini`.
+The Space **built green and ran green**. Retrieve worked. Rerank worked, because
+it is a local CPU cross-encoder that never calls an API. Extract and Synthesize
+failed on every single call, and the only symptom was two empty tabs.
 
-## Deliberately not ported
+Now `google/gemma-3-12b-it`: served, returns valid JSON, small enough to stay
+cheap on free-tier credits.
 
-| Left off | Why |
+## 2 · A withdrawn model id killed the backend too
+
+Five of nine configured OpenRouter ids had been withdrawn from the catalog,
+including **position 0 of the rerank pool** — the model every healthy request
+hit first.
+
+The failover pools did not help, because an unknown id returns **400, not 429**,
+and `complete()` only descended the pool on a rate limit or a 5xx. `app/llm.py`
+now fails over on an unservable id too, dropping only the ids the provider names
+and parking them for the catalog TTL rather than the 60-second rate-limit
+cooldown — a retired model is not coming back in a minute.
+
+## 3 · So model ids are now checked, not assumed
+
+`scripts/check_models.py` validates every id the project can dial, against the
+right provider, and exits non-zero so it can gate a release.
+
+```bash
+python scripts/check_models.py            # both providers
+python scripts/check_models.py --suggest  # live replacements for anything dead
+```
+
+The HF check **calls** the model rather than looking it up: catalog membership
+is not the property that matters, being servable *for this account* is — and
+that is precisely the distinction Phi-4-mini fell through.
+
+## 4 · HF force-upgraded the Space SDK mid-flight
+
+Hugging Face bumped the Space from Gradio 5.9.1 to 6.26.0 on its own. Gradio 6
+moved `theme` off the `Blocks` constructor onto `launch()`, and signals removed
+arguments with a **UserWarning, not an error** — so the Space kept serving while
+silently dropping its theme and rendering unstyled.
+
+Fixed, then pinned: `gradio==6.26.0` exactly, and `app.py` now checks the Gradio
+major it actually loaded, logging ERROR *and* rendering a banner into the page
+header on a mismatch. A Space log nobody opens is how this got missed once.
+
+## 5 · One LLM transport, on both branches
+
+Both branches had independently grown failover. `main` retried once against a
+single `LLM_FALLBACK_MODEL`; the prototype had ordered pools with cooldowns and
+runtime catalog discovery. The pools won.
+
+`app/llm.py` is now the only thing that issues an LLM request. `_json.py` keeps
+parsing, validation, and token accounting, and imports nothing from `app` — which
+is what lets `app.llm` build on it without a cycle. `complete()` returns
+`(content, prompt_tokens, completion_tokens)`, because `budget.add()` cannot
+count what a bare `str` return threw away.
+
+## 6 · Repo layout now mirrors the Space
+
+`hf_space/` was promoted to the repo root as pure renames, so the branch and the
+Space repo can be diffed with `git cat-file -s` instead of the HF API. All nine
+code files are byte-identical to what is deployed.
+
+> **Watch the line endings.** This repo runs `core.autocrlf=true`, so working-tree
+> files are CRLF while the committed blobs are LF. Copying a worktree file into
+> the Space pushes CRLF and silently breaks the mirror. Stage from the blob
+> (`git show HEAD:<path>`), never from the checkout.
+
+## What each branch kept
+
+Left off the Space branch, deliberately — a PDF fetch per paper and an extra
+embedding call per run do not suit a free-tier demo:
+
+| Not on the Space branch | Why |
 |---|---|
 | `pipeline/embed.py` | OpenRouter's `/embeddings` coverage is thin; costs a call per run |
-| `pipeline/fulltext.py` | a PDF fetch + parse per paper, plus a `pypdf` dependency |
+| `pipeline/fulltext.py` | a PDF fetch and parse per paper, plus a `pypdf` dependency |
 
-Both are default-off on `main`, so excluding them changes no behavior. Each
-needs its module, its test, and its `Settings` fields restored to re-enable.
+Both are default-off on `main`, so excluding them changes no behavior. Bringing
+`main` to parity therefore had to *re-apply* their wiring on top of the new
+transport rather than merge over it.
 
-## Tests Run
+## Models
 
-- **123 unit tests — 123 passed**, from the repo root *and* from `backend/`.
-- `pytest.ini` gained `norecursedirs = pipeline`: the promoted root `pipeline/`
-  shares a module name with `backend/app/pipeline` and would import-shadow it
-  during collection.
-- Stage tests moved their mock seam to `app.llm._get_client`. `test_service`'s
-  three per-module patches collapsed into one client dispatching on the system
-  prompt — the stages no longer have separate clients to mock apart.
-- `pytest -m live_models` checks the shipped defaults *and* the local `.env`
-  against the live OpenRouter catalog.
+| Where | Stage | Model |
+|---|---|---|
+| Backend | synthesize | `nemotron-3-ultra-550b-a55b:free` → 3 more in pool |
+| Backend | rerank · extract · expand | `gemma-4-31b-it:free` → 3 more in pool |
+| Space | extract · synthesize | `google/gemma-3-12b-it` (HF Inference API) |
+| Space | rerank | `BAAI/bge-reranker-v2-m3` (local CPU, no API, no quota) |
+
+Either backend pool also accepts the literal `auto`, which discovers free models
+from OpenRouter's catalog at runtime.
+
+## Tests
+
+**138 passing, 1 skipped** on `main`; **127 passing** on `hf-spaces-prototype`.
+The suite runs identically from the repo root and from `backend/` — that
+dual-cwd behaviour is what root-level `pytest.ini` exists for.
+
+| Area | Coverage |
+|---|---|
+| `test_llm.py` (16) | pool failover, cooldown registry, all-exhausted, auto-discovery, OpenRouter silent-fallback cooling, JSON mode, the 400-only retry without `response_format`, schema rejection, and failover past a withdrawn id |
+| `test_config.py` | asserts on **shipped defaults**, not `get_settings()` — reading loaded config is how a developer's own `.env` masked retired ids from everyone else |
+| `test_rerank.py` (11) | batching at 15/group, partial-batch failure, all-batches-fail raising, token accounting, pool failover |
+| `test_extract.py` (12) | per-paper resilience, extraction cache hits, storage write-through and its failure path |
+| `test_service.py` | full pipeline orchestration; its three per-module mocks collapsed into one client dispatching on the system prompt, since the stages no longer have separate clients to mock apart |
+| `test_embed.py` · `test_fulltext.py` | `main` only — the opt-in features the Space branch does not carry |
+
+Two opt-in network checks, excluded by default:
+
+```bash
+pytest -m live_models
+```
+
+They verify every configured OpenRouter id against the live catalog *and* call
+the Space's HF model, rejecting empty content — thinking models return `None`
+and would break the JSON-only extraction prompt. On `main` the Space tests skip
+themselves, because `main` ships no Gradio app and "no HF models here" is the
+correct answer rather than a failure.
+
+**Verified end to end** against the live HF API through the Space's own code
+path: 2/2 papers extracted in 4.2 s, synthesis returned 2 clusters,
+2 relationships, 1 tension, 3 open problems. The Space is `RUNNING` on
+Gradio 6.26.0 / Python 3.11.
