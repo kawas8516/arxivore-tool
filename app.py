@@ -20,6 +20,35 @@ from pipeline.synthesize import synthesize_landscape
 
 logging.basicConfig(level=logging.INFO)
 
+logger = logging.getLogger(__name__)
+
+# The Gradio major this app is written against, and what requirements.txt pins.
+# HF upgrades a Space's SDK on its own (5.9.1 -> 6.26.0 happened without us),
+# and Gradio signals removed constructor arguments with a UserWarning rather
+# than an error — so the app keeps serving while quietly dropping whatever it
+# no longer understands. That is how the Soft theme went missing with the Space
+# still green. Check the version we actually loaded and say so loudly.
+_EXPECTED_GRADIO_MAJOR = 6
+
+
+def _gradio_version_warning() -> str:
+    """Return a banner if the loaded Gradio is not the major we target."""
+    major = int(gr.__version__.split(".")[0])
+    if major == _EXPECTED_GRADIO_MAJOR:
+        logger.info("gradio %s (expected major %d)", gr.__version__, _EXPECTED_GRADIO_MAJOR)
+        return ""
+    logger.error(
+        "gradio %s loaded but this app targets major %d — arguments Gradio has "
+        "since moved are being ignored silently. Re-check app.py against the "
+        "current API and update requirements.txt.",
+        gr.__version__, _EXPECTED_GRADIO_MAJOR,
+    )
+    return (
+        f"\n> ⚠️ Running on Gradio {gr.__version__}, but this app targets "
+        f"{_EXPECTED_GRADIO_MAJOR}.x. Some UI options may be silently ignored.\n"
+    )
+
+
 _HEADER = """
 # Arxivore
 **Map an entire ML research field from a single search.**
@@ -142,7 +171,7 @@ def _build_landscape_md(topic: str, landscape) -> str:
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 with gr.Blocks(title="Arxivore") as demo:
-    gr.Markdown(_HEADER)
+    gr.Markdown(_HEADER + _gradio_version_warning())
 
     with gr.Tabs():
 

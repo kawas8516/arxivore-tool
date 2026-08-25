@@ -1,4 +1,6 @@
-gradio>=6.0.0
+# Pinned exactly: HF bumps a Space's SDK on its own, and Gradio drops removed
+# constructor args with only a UserWarning. See _EXPECTED_GRADIO_MAJOR in app.py.
+gradio==6.26.0
 arxiv>=2.1.0
 sentence-transformers>=3.0.0
 huggingface_hub>=0.23.0
