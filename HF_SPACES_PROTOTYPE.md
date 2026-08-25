@@ -101,12 +101,15 @@ the Space build.
 hand, so the nine code files above must stay byte-identical to it. Verify with:
 
 ```bash
-git cat-file -s $(git rev-parse HEAD:app.py)    # 6161
+git cat-file -s $(git rev-parse HEAD:app.py)    # 7695
 git cat-file -s $(git rev-parse HEAD:llm.py)    # 2078
-# models.py 1268 · requirements.txt 151
+# models.py 1268 · requirements.txt 312
 # pipeline/{__init__.py 0, extract.py 3393, rerank.py 982,
 #           retrieve.py 970, synthesize.py 2819}
 ```
+
+These drift every time a Space file changes. Re-run them after any push to the
+Space and update this block — a stale number here reads as a broken mirror.
 
 `README.md` is the one deliberate divergence: the Space carries the card alone,
 this branch carries the card plus the full project README beneath it.
